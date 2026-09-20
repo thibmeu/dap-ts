@@ -1,0 +1,44 @@
+{
+  "name": "dap-ts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Distributed Aggregation Protocol in TypeScript",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./messages": {
+      "types": "./dist/messages.d.ts",
+      "default": "./dist/messages.js"
+    },
+    "./fetch": {
+      "types": "./dist/fetch.d.ts",
+      "default": "./dist/fetch.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "lint": "biome check src test",
+    "format": "biome format --write src test",
+    "bench": "npm run build && node bench/count.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "hpke": "1.1.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.13",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  }
+}

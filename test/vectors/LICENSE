@@ -1,0 +1,35 @@
+Prio3Count_0.json, Prio3Count_2.json, and XofTurboShake128.json are from the CFRG VDAF specification
+repository at commit 5203892540a95e564dfa978345d16b40baf3c65d.
+Source: https://github.com/cfrg/draft-irtf-cfrg-vdaf/tree/5203892540a95e564dfa978345d16b40baf3c65d/test_vec
+Tag: draft-irtf-cfrg-vdaf-20. The JSON files are unchanged.
+
+hpke-rfc9180-a1.json contains the base-mode, sequence-zero test values from
+RFC 9180 Appendix A.1.1: https://www.rfc-editor.org/rfc/rfc9180.html#appendix-A.1.1
+Copyright (c) 2022 IETF Trust and the persons identified as the document authors.
+
+Copyright (c) 2026 IETF Trust and the persons identified as authors of the code.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of Internet Society, IETF or IETF Trust, nor the names of
+   specific contributors, may be used to endorse or promote products derived
+   from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

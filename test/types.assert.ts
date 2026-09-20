@@ -1,0 +1,37 @@
+import {
+	DAPClient,
+	type DAPClientOptions,
+	type PreparedReport,
+	prio3Count,
+	Task,
+} from "../src/index.js";
+
+// Compile-only checks for the public measurement type and opaque reports.
+export async function check(options: DAPClientOptions) {
+	const task = Task.create({
+		id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
+		leader: "https://l/",
+		helper: "https://h/",
+		timePrecision: 60,
+		minBatchSize: 100,
+		batchMode: "time-interval",
+		vdaf: prio3Count(),
+	});
+	const client = new DAPClient(task, options);
+	await client.prepareReport(1);
+	await client.prepareReport(2); // Valid number type, rejected at runtime.
+	// @ts-expect-error Count measurements are numbers.
+	await client.prepareReport(1n);
+	// @ts-expect-error Count measurements are not strings.
+	await client.prepareReport("1");
+	const decoded = Task.decode({
+		id: task.id,
+		configuration: task.encodeConfiguration(),
+	}).expect(prio3Count());
+	const narrowed = new DAPClient(decoded, options);
+	// @ts-expect-error expect() restores the measurement type.
+	await narrowed.prepareReport(true);
+	// @ts-expect-error Reports must be prepared by a client.
+	const report: PreparedReport = { id: "anything", time: 0 };
+	return report;
+}
