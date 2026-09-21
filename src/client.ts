@@ -97,6 +97,7 @@ export function header(
 export function checkMediaType(
 	headers: Readonly<Record<string, string>>,
 	message: string,
+	version: 18 | 19 = 19,
 ): void {
 	const [type, ...parts] = (header(headers, "content-type") ?? "").split(";");
 	const parameters = new Map<string, string>();
@@ -111,7 +112,7 @@ export function checkMediaType(
 	if (
 		type?.trim().toLowerCase() !== "application/ppm-dap" ||
 		parameters.get("message") !== message ||
-		(parameters.has("version") && parameters.get("version") !== "19")
+		(parameters.has("version") && parameters.get("version") !== String(version))
 	) {
 		throw new DAPError("InvalidResponse", "Unexpected DAP media type");
 	}
@@ -277,7 +278,8 @@ export class DAPClient<M> {
 		const nonce = randomBytes(this.#random, 16);
 		const rand = randomBytes(this.#random, 64);
 		const taskId = decodeId(this.task.id, 32);
-		const ctx = concat(new TextEncoder().encode("dap-19"), taskId);
+		const dapVersion = `dap-${this.task.dapVersion}`;
+		const ctx = concat(new TextEncoder().encode(dapVersion), taskId);
 		let shares: ReturnType<typeof shardCountWithRandomness>;
 		try {
 			shares = shardCountWithRandomness(
@@ -310,7 +312,7 @@ export class DAPClient<M> {
 			const results = await Promise.allSettled(
 				plaintexts.map(async (plaintext, i) => {
 					const info = concat(
-						new TextEncoder().encode("dap-19 input share"),
+						new TextEncoder().encode(`${dapVersion} input share`),
 						Uint8Array.of(1, i + 2),
 					);
 					const sealed = await this.#suite.Seal(keys[i]!, plaintext, {

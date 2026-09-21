@@ -20,13 +20,18 @@ export interface TaskOptions<M> {
 	readonly batchMode: "time-interval";
 	readonly vdaf: ClientVdaf<M>;
 	readonly extensions?: readonly Extension[];
+	/** Test-only compatibility with Janus's unreleased DAP 18 profile. */
+	readonly testOnly?: {
+		readonly dapVersion: 18;
+		readonly allowInsecureHttp: true;
+	};
 }
 export interface EncodedTask {
 	readonly id: string;
 	readonly configuration: Uint8Array;
 }
 
-function endpoint(value: Uint8Array): string {
+function endpoint(value: Uint8Array, allowInsecureHttp = false): string {
 	if (!value.length || value.some((byte) => byte < 0x21 || byte > 0x7e)) {
 		throw new DAPError("InvalidTask", "Endpoint must contain ASCII URL bytes");
 	}
@@ -38,7 +43,8 @@ function endpoint(value: Uint8Array): string {
 		throw new DAPError("InvalidTask", "Invalid endpoint URL");
 	}
 	if (
-		url.protocol !== "https:" ||
+		(url.protocol !== "https:" &&
+			!(allowInsecureHttp && url.protocol === "http:")) ||
 		url.username ||
 		url.password ||
 		/[?#\\]/.test(text) ||
@@ -72,6 +78,8 @@ export class Task<M> {
 	readonly minBatchSize: number;
 	readonly batchMode = "time-interval" as const;
 	readonly vdaf: ClientVdaf<M>;
+	/** @internal Test compatibility; production tasks always use DAP 19. */
+	readonly dapVersion: 18 | 19;
 	#configuration: Uint8Array;
 	#info: Uint8Array;
 	#interval: { start: bigint; end: bigint } | undefined;
@@ -80,10 +88,12 @@ export class Task<M> {
 		id: string,
 		encoded: Uint8Array,
 		configuration: TaskConfiguration,
+		testOnly?: TaskOptions<unknown>["testOnly"],
 	) {
 		this.id = base64url(decodeId(id, 32));
-		this.leader = endpoint(configuration.leader);
-		this.helper = endpoint(configuration.helper);
+		this.leader = endpoint(configuration.leader, testOnly?.allowInsecureHttp);
+		this.helper = endpoint(configuration.helper, testOnly?.allowInsecureHttp);
+		this.dapVersion = testOnly?.dapVersion ?? 19;
 		this.timePrecision = positiveSafe(configuration.timePrecision);
 		this.minBatchSize = positiveSafe(configuration.minBatchSize);
 		if (configuration.batchMode !== 1 || configuration.batchConfig.length) {
@@ -156,6 +166,7 @@ export class Task<M> {
 			options.id,
 			encodeTaskConfiguration(configuration),
 			configuration,
+			options.testOnly,
 		);
 	}
 

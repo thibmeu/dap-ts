@@ -28,6 +28,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "test:janus": "test/janus.sh",
     "lint": "biome check src test",
     "format": "biome format --write src test",
     "bench": "npm run build && node bench/count.mjs"

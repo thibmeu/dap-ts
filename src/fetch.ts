@@ -122,7 +122,7 @@ export async function fetchHpkeConfigs(
 		});
 		options.signal?.throwIfAborted();
 		checkStatus(data);
-		checkMediaType(data.headers, "hpke-config-list");
+		checkMediaType(data.headers, "hpke-config-list", task.dapVersion);
 		return HpkeConfigList.parse(data.body);
 	};
 	const [leader, helper] = await Promise.all([
