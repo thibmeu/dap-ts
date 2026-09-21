@@ -16,6 +16,12 @@ export function bytes(value: Uint8Array, length?: number): Uint8Array {
 export function concat(
 	...parts: readonly Uint8Array[]
 ): Uint8Array<ArrayBuffer> {
+	return concatParts(parts);
+}
+
+export function concatParts(
+	parts: readonly Uint8Array[],
+): Uint8Array<ArrayBuffer> {
 	const result = new Uint8Array(
 		parts.reduce((sum, part) => sum + bytes(part).length, 0),
 	);

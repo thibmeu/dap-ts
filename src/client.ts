@@ -1,4 +1,4 @@
-import { base64url, bytes, concat, decodeId } from "./binary.js";
+import { base64url, bytes, concat, concatParts, decodeId } from "./binary.js";
 import { DAPError } from "./errors.js";
 import {
 	type AggregatorHpkeConfigs,
@@ -388,7 +388,7 @@ export class DAPClient<M> {
 		const ids = reports.map((report) => report.id);
 		if (new Set(ids).size !== ids.length)
 			throw new DAPError("InvalidReport", "Duplicate report IDs in upload");
-		const body = concat(...encoded);
+		const body = concatParts(encoded);
 		const url = resource(this.task.leader, `tasks/${this.task.id}/reports`);
 		const headers = Object.freeze({
 			"content-type": "application/ppm-dap;message=upload-req",

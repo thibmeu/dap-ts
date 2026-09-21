@@ -5,12 +5,27 @@ import {
 	decodeReport,
 	decodeTaskConfiguration,
 	decodeUploadErrors,
+	encodeExtensions,
 	encodeHpkeConfigList,
 	encodeReport,
 	encodeTaskConfiguration,
 	encodeUploadRequest,
 } from "../src/messages.js";
 import { config, hex, task, taskOptions, taskWire, text } from "./fixtures.js";
+
+it("encodes large upload lists without an argument-count limit", () => {
+	const reports = Array.from({ length: 150_000 }, () => Uint8Array.of(42));
+	expect(encodeUploadRequest(reports)).toEqual(
+		new Uint8Array(150_000).fill(42),
+	);
+});
+
+it("rejects oversized extension and HPKE lists with protocol errors", () => {
+	expect(() =>
+		encodeExtensions([{ type: 1, data: new Uint8Array(65532) }]),
+	).toThrow(DAPError);
+	expect(() => encodeHpkeConfigList(Array(257).fill(config))).toThrow(DAPError);
+});
 
 describe("task configuration", () => {
 	it("matches a hand-derived DAP 19 encoding", () => {

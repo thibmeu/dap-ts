@@ -1,4 +1,12 @@
-import { base64url, bytes, concat, Reader, uint, vector } from "./binary.js";
+import {
+	base64url,
+	bytes,
+	concat,
+	concatParts,
+	Reader,
+	uint,
+	vector,
+} from "./binary.js";
 import { DAPError } from "./errors.js";
 import {
 	isPreparedReport,
@@ -56,7 +64,11 @@ export function encodeExtensions(
 ): Uint8Array {
 	const seen = new Set<number>();
 	let previous = -1;
+	let size = 0;
 	const parts = extensions.map((extension) => {
+		size += 4 + bytes(extension.data).length;
+		if (size > 65535)
+			throw new DAPError("InvalidMessage", "Extensions exceed the size limit");
 		if (seen.has(extension.type) || (sorted && extension.type <= previous)) {
 			throw new DAPError("InvalidMessage", "Duplicate or unordered extension");
 		}
@@ -64,7 +76,7 @@ export function encodeExtensions(
 		previous = extension.type;
 		return concat(uint(extension.type, 2), vector(extension.data, 2));
 	});
-	return vector(concat(...parts), 2);
+	return vector(concatParts(parts), 2);
 }
 
 function readExtensions(
@@ -131,9 +143,11 @@ export function decodeTaskConfiguration(
 export function encodeHpkeConfigList(
 	configs: readonly HpkeConfig[],
 ): Uint8Array {
+	if (configs.length > 256)
+		throw new DAPError("InvalidHpkeConfig", "Too many HPKE configurations");
 	const result = vector(
-		concat(
-			...configs.map((config) =>
+		concatParts(
+			configs.map((config) =>
 				concat(
 					uint(config.id, 1),
 					uint(config.kemId, 2),
@@ -245,8 +259,8 @@ export function decodeReport(input: Uint8Array): Report {
 export function encodeUploadRequest(
 	reports: readonly (Report | PreparedReport | Uint8Array)[],
 ): Uint8Array {
-	return concat(
-		...reports.map((report) =>
+	return concatParts(
+		reports.map((report) =>
 			report instanceof Uint8Array ? report : encodeReport(report),
 		),
 	);

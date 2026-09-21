@@ -12,3 +12,8 @@ Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.c
 - Transport-neutral upload operations, an optional Fetch adapter, and binary message codecs.
 - Specification-vector tests for Prio3Count, TurboSHAKE, and HPKE.
 - README with a count-reporting example and usage guidance.
+
+### Fixed
+
+- Large upload lists no longer hit JavaScript's function-argument limit during encoding.
+- Oversized extension and HPKE configuration lists are rejected before assembling the full message.
