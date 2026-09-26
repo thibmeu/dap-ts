@@ -8,7 +8,7 @@ import {
 	resource,
 } from "./client.js";
 import { DAPError } from "./errors.js";
-import { createSuite } from "./hpke.js";
+import { createSuite, prepareRecipientKey } from "./hpke.js";
 import {
 	type CollectionJobResponse,
 	decodeCollectionJobResponse,
@@ -68,7 +68,7 @@ export class Collector {
 	readonly task: Task<number | bigint>;
 	#configId: number;
 	#suite = createSuite();
-	#key: Promise<CryptoKey>;
+	#key: Promise<CryptoKeyPair>;
 	#creationUrl: string;
 
 	constructor(task: Task<number | bigint>, options: CollectorOptions) {
@@ -83,10 +83,7 @@ export class Collector {
 				"InvalidHpkeConfig",
 				"Invalid collector HPKE config ID",
 			);
-		const secret = bytes(options.privateKey, 32).slice();
-		this.#key = this.#suite
-			.DeserializePrivateKey(secret)
-			.finally(() => secret.fill(0));
+		this.#key = prepareRecipientKey(bytes(options.privateKey, 32));
 		this.task = task;
 		this.#configId = options.configId;
 		this.#creationUrl = resource(

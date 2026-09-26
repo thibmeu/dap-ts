@@ -24,7 +24,7 @@ import {
 	vector,
 } from "./binary.js";
 import { DAPError } from "./errors.js";
-import { createSuite } from "./hpke.js";
+import { createSuite, prepareRecipientKey } from "./hpke.js";
 import {
 	encodeInputShareAad,
 	encodeReportMetadata,
@@ -186,7 +186,7 @@ export function leaderCountFinish(
 
 export interface AggregatorKey {
 	readonly configId: number;
-	readonly privateKey: Uint8Array | CryptoKey;
+	readonly privateKey: Uint8Array | CryptoKey | CryptoKeyPair;
 }
 
 /** Encode a per-report DAP rejection after a host replay or collected-bucket check. */
@@ -203,11 +203,11 @@ export function encodeCountJobRejection(
 export async function prepareAggregatorKey(key: {
 	readonly configId: number;
 	readonly privateKey: Uint8Array;
-}): Promise<{ configId: number; privateKey: CryptoKey }> {
+}): Promise<{ configId: number; privateKey: CryptoKeyPair }> {
 	uint(key.configId, 1);
 	return {
 		configId: key.configId,
-		privateKey: await suite.DeserializePrivateKey(bytes(key.privateKey, 32)),
+		privateKey: await prepareRecipientKey(key.privateKey),
 	};
 }
 
@@ -288,7 +288,7 @@ export async function openPrio3InputShare(
 	try {
 		const privateKey =
 			key.privateKey instanceof Uint8Array
-				? await suite.DeserializePrivateKey(key.privateKey)
+				? await prepareRecipientKey(key.privateKey)
 				: key.privateKey;
 		plaintext = await suite.Open(
 			privateKey,

@@ -15,6 +15,7 @@ Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.c
 - Source installs and package creation build the distributable JavaScript and declarations.
 - Root `Collector` role with authenticated collection requests, resumable polling, HPKE decryption, and exact integer results.
 - Root `Leader` and `Helper` roles for explicit, persistable aggregation jobs.
+- GitHub Actions checks for vectors, types, lint, build, and package contents.
 
 ### Changed
 
@@ -24,3 +25,4 @@ Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.c
 
 - Large upload lists no longer hit JavaScript's function-argument limit during encoding.
 - Oversized extension and HPKE configuration lists are rejected before assembling the full message.
+- Recipient key pairs let the aggregator and collector decrypt in workerd while keeping their stored private keys nonextractable.

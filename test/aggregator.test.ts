@@ -13,10 +13,12 @@ import {
 	leaderCountJobFinish,
 	leaderCountJobInit,
 	openCountInputShare,
+	prepareAggregatorKey,
 } from "../src/aggregator.js";
 import { concat, uint } from "../src/binary.js";
 import { Client } from "../src/client.js";
 import type { DAPError } from "../src/errors.js";
+import { createSuite } from "../src/hpke.js";
 import { decodeReport, encodeReport } from "../src/messages.js";
 import { unshardCount } from "../src/prio3-count.js";
 import { Task } from "../src/task.js";
@@ -30,6 +32,17 @@ import badMeasurement from "./vectors/Prio3Count_bad_meas_share.json";
 import badWire from "./vectors/Prio3Count_bad_wire_seed.json";
 
 const bytes = (hex: string) => Uint8Array.fromHex(hex);
+
+it("prepares a nonextractable recipient key pair from the published X25519 key", async () => {
+	const prepared = await prepareAggregatorKey({
+		configId: 7,
+		privateKey: bytes(hpkeVector.skRm),
+	});
+	expect(prepared.privateKey.privateKey.extractable).toBe(false);
+	expect(
+		await createSuite().SerializePublicKey(prepared.privateKey.publicKey),
+	).toEqual(bytes(hpkeVector.pkRm));
+});
 
 for (const [name, vector] of Object.entries({ count0, count2 })) {
 	it(`${name}: matches published verifier shares and completes the two roles`, () => {

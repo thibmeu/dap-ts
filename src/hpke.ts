@@ -37,6 +37,33 @@ export function createSuite(random?: RandomSource): CipherSuite<CryptoKey> {
 	return new CipherSuite(factory, KDF_HKDF_SHA256, AEAD_AES_128_GCM);
 }
 
+/** Supply the recipient public key on runtimes without subtle.getPublicKey(). */
+export async function prepareRecipientKey(
+	privateBytes: Uint8Array,
+): Promise<CryptoKeyPair> {
+	const suite = createSuite();
+	const secret = bytes(privateBytes, 32).slice();
+	try {
+		const temporary = await suite.DeserializePrivateKey(secret, true);
+		const jwk = await crypto.subtle.exportKey("jwk", temporary);
+		if (jwk.kty !== "OKP" || jwk.crv !== "X25519" || !jwk.x)
+			throw new DAPError("InvalidHpkeConfig", "Invalid X25519 private key");
+		const publicKey = await suite.DeserializePublicKey(
+			bytes(
+				Uint8Array.from(
+					atob(jwk.x.replaceAll("-", "+").replaceAll("_", "/")),
+					(char) => char.charCodeAt(0),
+				),
+				32,
+			),
+		);
+		const privateKey = await suite.DeserializePrivateKey(secret);
+		return { privateKey, publicKey };
+	} finally {
+		secret.fill(0);
+	}
+}
+
 export class HpkeConfigList {
 	#encoded: Uint8Array;
 	private constructor(encoded: Uint8Array) {
