@@ -1,4 +1,4 @@
-import { base64url, bytes, decodeId, Reader, uint } from "./binary.js";
+import { base64url, bytes, concat, decodeId, Reader, uint } from "./binary.js";
 import { DAPError } from "./errors.js";
 import {
 	type DecodeOptions,
@@ -8,6 +8,7 @@ import {
 	type TaskConfiguration,
 } from "./messages.js";
 import { type ClientVdaf, prio3Count } from "./prio3-count.js";
+import { prio3Histogram } from "./prio3-histogram.js";
 import { prio3Sum } from "./prio3-sum.js";
 
 export interface TaskOptions<M> {
@@ -117,6 +118,19 @@ export class Task<M> {
 			} catch (cause) {
 				throw new DAPError("InvalidTask", "Invalid Prio3Sum bound", { cause });
 			}
+		} else if (
+			configuration.vdafType === 4 &&
+			configuration.vdafConfig.length === 8 &&
+			!testOnly
+		) {
+			const reader = new Reader(configuration.vdafConfig);
+			try {
+				vdaf = prio3Histogram(reader.uint(4), reader.uint(4));
+			} catch (cause) {
+				throw new DAPError("InvalidTask", "Invalid Prio3Histogram parameters", {
+					cause,
+				});
+			}
 		} else {
 			throw new DAPError("UnsupportedVdaf", "Unsupported VDAF configuration");
 		}
@@ -144,6 +158,12 @@ export class Task<M> {
 			(options.vdaf?.type !== "prio3-sum" ||
 				options.vdaf.maxMeasurement === undefined ||
 				options.vdaf !== prio3Sum(options.vdaf.maxMeasurement) ||
+				options.testOnly) &&
+			(options.vdaf?.type !== "prio3-histogram" ||
+				options.vdaf.length === undefined ||
+				options.vdaf.chunkLength === undefined ||
+				options.vdaf !==
+					prio3Histogram(options.vdaf.length, options.vdaf.chunkLength) ||
 				options.testOnly)
 		)
 			throw new DAPError("UnsupportedVdaf", "Use a built-in VDAF factory");
@@ -176,11 +196,21 @@ export class Task<M> {
 			minBatchSize: BigInt(options.minBatchSize),
 			batchMode: 1,
 			batchConfig: new Uint8Array(),
-			vdafType: options.vdaf.type === "prio3-count" ? 1 : 2,
+			vdafType:
+				options.vdaf.type === "prio3-count"
+					? 1
+					: options.vdaf.type === "prio3-sum"
+						? 2
+						: 4,
 			vdafConfig:
 				options.vdaf.type === "prio3-count"
 					? new Uint8Array()
-					: uint(options.vdaf.maxMeasurement!, 8),
+					: options.vdaf.type === "prio3-sum"
+						? uint(options.vdaf.maxMeasurement!, 8)
+						: concat(
+								uint(options.vdaf.length!, 4),
+								uint(options.vdaf.chunkLength!, 4),
+							),
 			extensions: options.extensions ?? [],
 		};
 		return new Task<M>(

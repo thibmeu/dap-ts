@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { concat, uint, vector } from "../src/binary.js";
 import { Collector } from "../src/collector.js";
 import { createSuite } from "../src/hpke.js";
-import { prio3Sum, Task } from "../src/index.js";
+import { prio3Histogram, prio3Sum, Task } from "../src/index.js";
 import {
 	decodeCollectionJobRequest,
 	decodeCollectionJobResponse,
@@ -162,6 +162,67 @@ it("decrypts bounded sum shares and rejects results above the batch bound", asyn
 	await expect(prepared.process(await response(133701n))).rejects.toMatchObject(
 		{ code: "InvalidResponse" },
 	);
+});
+
+it("decrypts histogram shares and checks the bucket total", async () => {
+	const histogramTask = Task.create({
+		id: task.id,
+		leader: task.leader,
+		helper: task.helper,
+		timePrecision: task.timePrecision,
+		minBatchSize: task.minBatchSize,
+		batchMode: "time-interval",
+		vdaf: prio3Histogram(4, 2),
+	});
+	const { suite, pair, privateKey } = await keys();
+	const collector = new Collector(histogramTask, { configId: 7, privateKey });
+	const prepared = collector.prepare({ start: 10, duration: 2 });
+	const aad = concat(
+		Uint8Array.fromBase64(histogramTask.id, { alphabet: "base64url" }),
+		histogramTask.encodeConfiguration(),
+		prepared.request.body!,
+	);
+	const seal = async (role: number, buckets: number[]) => {
+		const share = new Uint8Array(16 * buckets.length);
+		const view = new DataView(share.buffer);
+		for (const [i, bucket] of buckets.entries())
+			view.setBigUint64(i * 16, BigInt(bucket), true);
+		const ciphertext = await suite.Seal(pair.publicKey, share, {
+			info: concat(
+				text.encode("dap-19 aggregate share"),
+				Uint8Array.of(role, 0),
+			),
+			aad,
+		});
+		return concat(
+			uint(7, 1),
+			vector(ciphertext.encapsulatedSecret, 2),
+			vector(ciphertext.ciphertext, 4),
+		);
+	};
+	const response = async (helper: number[]) => ({
+		status: 200,
+		headers: {
+			location: `/tasks/${histogramTask.id}/collection_jobs/${jobId}`,
+			"content-type": "application/ppm-dap;message=collection-job-resp",
+		},
+		body: concat(
+			uint(100, 8),
+			uint(10, 8),
+			uint(2, 8),
+			await seal(2, [25, 0, 0, 0]),
+			await seal(3, helper),
+		),
+	});
+	await expect(
+		prepared.process(await response([0, 50, 25, 0])),
+	).resolves.toMatchObject({
+		status: "complete",
+		histogram: [25n, 50n, 25n, 0n],
+	});
+	await expect(
+		prepared.process(await response([0, 49, 25, 0])),
+	).rejects.toMatchObject({ code: "InvalidResponse" });
 });
 
 it("decrypts role-bound aggregate shares into an exact bigint count", async () => {

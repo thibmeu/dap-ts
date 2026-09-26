@@ -54,12 +54,12 @@ for (const rejection of result.rejected) {
 
 ## Usage
 
-The package uses ESM and Web APIs. It supports Prio3Count and Prio3Sum with
+The package uses ESM and Web APIs. It supports Prio3Count, Prio3Sum, and Prio3Histogram with
 time-interval batches, targeting DAP draft 19 and
 [VDAF draft 20](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-20.txt).
 
 - `Task.create()` configures a task; `Task.decode()` reads provisioned configuration bytes.
-- `prepareReport()` accepts `0` or `1` for count tasks. For sums, use `prio3Sum(maxMeasurement)` and report an integer from `0` through that bound. Sum measurements and bounds can be `bigint`.
+- `prepareReport()` accepts `0` or `1` for count tasks. For sums, use `prio3Sum(maxMeasurement)` and report an integer from `0` through that bound. Sum measurements and bounds can be `bigint`. For histograms, use `prio3Histogram(length, chunkLength)` and report a bucket index from `0` through `length - 1`.
 - `prepareUpload()` returns request metadata and a response processor for your own transport.
 - `PreparedUpload.request` contains the request to send; `process()` validates the response and reports each outcome.
 - `result.accepted` and `result.rejected` describe individual outcomes. Request-level protocol failures throw `DAPError`.
@@ -73,6 +73,11 @@ Binary codecs live in `dap-ts/messages`. [Sinbad](https://github.com/thibmeu/sin
 For a bounded sum, set `vdaf: prio3Sum(1337)` when creating the task and call
 `client.prepareReport(42)`. Import `prio3Sum` from `dap-ts`. Both aggregators
 must be provisioned with the same bound.
+
+For a fixed histogram, set `vdaf: prio3Histogram(4, 2)` and call
+`client.prepareReport(2)` to report bucket 2. Import `prio3Histogram` from
+`dap-ts`. The length and chunk length must match both aggregators; this package
+supports values from 1 through 4096 for each.
 
 ## Collection
 
@@ -97,9 +102,11 @@ else saveForLater(progress.state);
 ```
 
 When a job is pending, persist `progress.state` and call `collector.resume(state)`
-to prepare the next request. The collector supports the DAP 19 Prio3Count and
-Prio3Sum profiles; the Janus DAP 18 upload test does not exercise collection.
-For sum tasks, completed progress has `sum` instead of `count`; both are `bigint`.
+to prepare the next request. The collector supports the DAP 19 Prio3Count,
+Prio3Sum, and Prio3Histogram profiles; the Janus DAP 18 upload test does not
+exercise collection. For sum tasks, completed progress has `sum` instead of
+`count`; both are `bigint`. Histogram tasks return `histogram`, an array of
+`bigint` bucket counts.
 
 ## Security considerations
 

@@ -3,6 +3,7 @@ import {
 	type DAPClientOptions,
 	type PreparedReport,
 	prio3Count,
+	prio3Histogram,
 	prio3Sum,
 	Task,
 } from "../src/index.js";
@@ -44,6 +45,21 @@ export async function check(options: DAPClientOptions) {
 	);
 	await sum.prepareReport(42n);
 	await sum.prepareReport(42);
+	const histogram = new DAPClient(
+		Task.create({
+			id: task.id,
+			leader: task.leader,
+			helper: task.helper,
+			timePrecision: 60,
+			minBatchSize: 100,
+			batchMode: "time-interval",
+			vdaf: prio3Histogram(4, 2),
+		}),
+		options,
+	);
+	await histogram.prepareReport(2);
+	// @ts-expect-error Histogram buckets are numbers.
+	await histogram.prepareReport(2n);
 	// @ts-expect-error Sum measurements are integers, not strings.
 	await sum.prepareReport("42");
 	// @ts-expect-error expect() restores the measurement type.

@@ -2,8 +2,10 @@ import { turboshake128 } from "@noble/hashes/sha3-addons.js";
 
 declare const measurementType: unique symbol;
 export interface ClientVdaf<M> {
-	readonly type: "prio3-count" | "prio3-sum";
+	readonly type: "prio3-count" | "prio3-sum" | "prio3-histogram";
 	readonly maxMeasurement?: bigint;
+	readonly length?: number;
+	readonly chunkLength?: number;
 	readonly [measurementType]: M;
 }
 const count = Object.freeze({ type: "prio3-count" }) as ClientVdaf<number>;
@@ -55,20 +57,28 @@ export function expand(
 	binder: Uint8Array,
 	length: number,
 	vdafId = 1,
+	modulus = P,
+	fieldWidth = 8,
 ): bigint[] {
 	// Draft 20 retains VERSION=18. Class=0; the VDAF ID separates variants.
 	const dst = new Uint8Array(8 + ctx.length);
 	dst.set([18, 0, 0, 0, 0, vdafId, 0, usage]);
 	dst.set(ctx, 8);
 	const stream = xof(seed, dst, binder);
-	const bytes = new Uint8Array(8);
+	const bytes = new Uint8Array(fieldWidth);
 	const view = new DataView(bytes.buffer);
 	const elements: bigint[] = [];
 	try {
 		while (elements.length < length) {
 			stream.xofInto(bytes);
-			const value = view.getBigUint64(0, true);
-			if (value < P) elements.push(value);
+			let value: bigint;
+			if (fieldWidth === 8) value = view.getBigUint64(0, true);
+			else {
+				value = 0n;
+				for (let i = fieldWidth - 1; i >= 0; i--)
+					value = (value << 8n) | BigInt(bytes[i]!);
+			}
+			if (value < modulus) elements.push(value);
 		}
 		return elements;
 	} finally {

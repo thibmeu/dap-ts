@@ -5,6 +5,7 @@ import {
 	DAPClient,
 	DAPError,
 	HpkeConfigList,
+	prio3Histogram,
 	prio3Sum,
 	Task,
 } from "../src/index.js";
@@ -15,6 +16,7 @@ import {
 	encodeReport,
 } from "../src/messages.js";
 import { shardCountWithRandomness } from "../src/prio3-count.js";
+import { shardHistogramWithRandomness } from "../src/prio3-histogram.js";
 import { shardSumWithRandomness } from "../src/prio3-sum.js";
 import {
 	config,
@@ -147,6 +149,62 @@ it("round-trips a bounded sum task and encrypts its published VDAF shares", asyn
 	const aad = encodeInputShareAad(
 		taskId,
 		sumTask.encodeConfiguration(),
+		report.metadata,
+		report.publicShare,
+	);
+	for (const [i, ciphertext] of [report.leader, report.helper].entries()) {
+		const plaintext = await suite.Open(
+			privateKey,
+			ciphertext.enc,
+			ciphertext.payload,
+			{
+				info: concat(text("dap-19 input share"), Uint8Array.of(1, i + 2)),
+				aad,
+			},
+		);
+		const reader = new Reader(plaintext);
+		expect(reader.vector(2)).toEqual(new Uint8Array());
+		expect(reader.vector(4)).toEqual(expected.inputShares[i]);
+		reader.end();
+	}
+});
+
+it("round-trips a histogram task and encrypts its VDAF shares", async () => {
+	const histogramTask = Task.create({
+		...taskOptions,
+		vdaf: prio3Histogram(4, 2),
+	});
+	const decoded = Task.decode({
+		id: histogramTask.id,
+		configuration: histogramTask.encodeConfiguration(),
+	});
+	expect(decoded.expect(prio3Histogram(4, 2)).encodeConfiguration()).toEqual(
+		histogramTask.encodeConfiguration(),
+	);
+	expect(() => decoded.expect(prio3Histogram(5, 2))).toThrow();
+	const client = new DAPClient(histogramTask, {
+		hpke,
+		random: deterministicRandom(),
+		clock: () => 179999,
+	});
+	for (const invalid of [-1, 4, 0.5, Number.MAX_SAFE_INTEGER + 1])
+		await expect(client.prepareReport(invalid)).rejects.toMatchObject({
+			code: "InvalidMeasurement",
+		});
+	const report = decodeReport(encodeReport(await client.prepareReport(2)));
+	const taskId = decodeId(histogramTask.id, 32);
+	const expected = shardHistogramWithRandomness(
+		2,
+		4,
+		2,
+		concat(text("dap-19"), taskId),
+		report.metadata.id,
+		Uint8Array.from({ length: 128 }, (_, i) => i + 16),
+	);
+	expect(report.publicShare).toEqual(expected.publicShare);
+	const aad = encodeInputShareAad(
+		taskId,
+		histogramTask.encodeConfiguration(),
 		report.metadata,
 		report.publicShare,
 	);

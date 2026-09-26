@@ -1,3 +1,4 @@
+import { transform } from "./field.js";
 import {
 	type ClientVdaf,
 	expand,
@@ -31,47 +32,6 @@ export function prio3Sum(
 		sumVdafs.set(max, vdaf);
 	}
 	return vdaf;
-}
-
-function power(base: bigint, exponent: bigint): bigint {
-	let result = 1n;
-	while (exponent) {
-		if (exponent & 1n) result = mod(result * base);
-		base = mod(base * base);
-		exponent >>= 1n;
-	}
-	return result;
-}
-
-// The Field64 transform evaluates at successive powers of its principal root.
-function transform(values: bigint[], size: number, inverse = false): bigint[] {
-	const out = Array<bigint>(size).fill(0n);
-	for (let i = 0; i < values.length; i++) out[i] = values[i]!;
-	for (let i = 1, j = 0; i < size; i++) {
-		let bit = size >> 1;
-		for (; j & bit; bit >>= 1) j ^= bit;
-		j ^= bit;
-		if (i < j) [out[i], out[j]] = [out[j]!, out[i]!];
-	}
-	for (let width = 2; width <= size; width *= 2) {
-		const root = power(7n, (P - 1n) / BigInt(width));
-		const step = inverse ? power(root, P - 2n) : root;
-		for (let start = 0; start < size; start += width) {
-			let factor = 1n;
-			for (let j = 0; j < width / 2; j++) {
-				const a = out[start + j]!;
-				const b = mod(out[start + j + width / 2]! * factor);
-				out[start + j] = mod(a + b);
-				out[start + j + width / 2] = mod(a - b);
-				factor = mod(factor * step);
-			}
-		}
-	}
-	if (inverse) {
-		const scale = power(BigInt(size), P - 2n);
-		for (let i = 0; i < size; i++) out[i] = mod(out[i]! * scale);
-	}
-	return out;
 }
 
 function encodeMeasurement(value: bigint, max: bigint): bigint[] {
@@ -128,8 +88,8 @@ export function shardSumWithRandomness(
 		...meas,
 		...Array<bigint>(wireLength - meas.length - 1).fill(0n),
 	];
-	const polynomial = transform(wire, wireLength, true);
-	const evaluations = transform(polynomial, wireLength * 2);
+	const polynomial = transform(wire, wireLength, P, true);
+	const evaluations = transform(polynomial, wireLength * 2, P);
 	const proof = [
 		seed!,
 		...evaluations.slice(0, proofLength - 1).map((x) => mod(x * x - x)),

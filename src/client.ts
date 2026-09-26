@@ -17,6 +17,10 @@ import {
 	type HpkeConfig,
 } from "./messages.js";
 import { shardCountWithRandomness } from "./prio3-count.js";
+import {
+	shardHistogramWithRandomness,
+	validateHistogramMeasurement,
+} from "./prio3-histogram.js";
 import { shardSumWithRandomness, validateSumMeasurement } from "./prio3-sum.js";
 import {
 	type PreparedReport,
@@ -261,6 +265,20 @@ export class DAPClient<M> {
 				);
 			}
 		}
+		if (this.task.vdaf.type === "prio3-histogram") {
+			try {
+				validateHistogramMeasurement(
+					measurement as number,
+					this.task.vdaf.length!,
+				);
+			} catch (cause) {
+				throw new DAPError(
+					"InvalidMeasurement",
+					"Histogram bucket is outside its range",
+					{ cause },
+				);
+			}
+		}
 		const milliseconds =
 			options.time instanceof Date
 				? options.time.getTime()
@@ -295,7 +313,10 @@ export class DAPClient<M> {
 				);
 		}
 		const nonce = randomBytes(this.#random, 16);
-		const rand = randomBytes(this.#random, 64);
+		const rand = randomBytes(
+			this.#random,
+			this.task.vdaf.type === "prio3-histogram" ? 128 : 64,
+		);
 		const taskId = decodeId(this.task.id, 32);
 		const dapVersion = `dap-${this.task.dapVersion}`;
 		const ctx = concat(new TextEncoder().encode(dapVersion), taskId);
@@ -305,13 +326,22 @@ export class DAPClient<M> {
 				shares =
 					this.task.vdaf.type === "prio3-count"
 						? shardCountWithRandomness(measurement as number, ctx, nonce, rand)
-						: shardSumWithRandomness(
-								measurement as number | bigint,
-								this.task.vdaf.maxMeasurement!,
-								ctx,
-								nonce,
-								rand,
-							);
+						: this.task.vdaf.type === "prio3-sum"
+							? shardSumWithRandomness(
+									measurement as number | bigint,
+									this.task.vdaf.maxMeasurement!,
+									ctx,
+									nonce,
+									rand,
+								)
+							: shardHistogramWithRandomness(
+									measurement as number,
+									this.task.vdaf.length!,
+									this.task.vdaf.chunkLength!,
+									ctx,
+									nonce,
+									rand,
+								);
 			} catch (cause) {
 				if (cause instanceof RangeError || cause instanceof TypeError)
 					throw new DAPError("InvalidMeasurement", cause.message, { cause });

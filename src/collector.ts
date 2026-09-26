@@ -15,6 +15,7 @@ import {
 	encodeCollectionJobRequest,
 } from "./messages.js";
 import { unshardCount } from "./prio3-count.js";
+import { unshardHistogram } from "./prio3-histogram.js";
 import { unshardSum } from "./prio3-sum.js";
 import { Task } from "./task.js";
 
@@ -44,6 +45,11 @@ export type CollectionProgress =
 	  } & (
 			| { readonly count: bigint; readonly sum?: never }
 			| { readonly sum: bigint; readonly count?: never }
+			| {
+					readonly histogram: readonly bigint[];
+					readonly count?: never;
+					readonly sum?: never;
+			  }
 	  ));
 
 export interface PreparedCollection {
@@ -259,31 +265,46 @@ export class Collector {
 				);
 			}
 		}
-		let value: bigint;
+		let value: bigint | bigint[];
 		try {
 			value =
 				this.task.vdaf.type === "prio3-count"
 					? unshardCount(shares as [Uint8Array, Uint8Array])
-					: unshardSum(shares as [Uint8Array, Uint8Array]);
+					: this.task.vdaf.type === "prio3-sum"
+						? unshardSum(shares as [Uint8Array, Uint8Array])
+						: unshardHistogram(
+								shares as [Uint8Array, Uint8Array],
+								this.task.vdaf.length!,
+							);
 		} catch (cause) {
 			throw new DAPError("InvalidResponse", "Malformed aggregate share", {
 				cause,
 			});
 		}
-		const bound =
-			this.task.vdaf.type === "prio3-count"
-				? 1n
-				: this.task.vdaf.maxMeasurement!;
-		if (value > result.reportCount * bound)
-			throw new DAPError(
-				"InvalidResponse",
-				"Aggregate exceeds the measurement bound",
-			);
+		if (Array.isArray(value)) {
+			if (
+				value.some((bucket) => bucket > result.reportCount) ||
+				value.reduce((sum, bucket) => sum + bucket, 0n) !== result.reportCount
+			)
+				throw new DAPError("InvalidResponse", "Invalid histogram aggregate");
+		} else {
+			const bound =
+				this.task.vdaf.type === "prio3-count"
+					? 1n
+					: this.task.vdaf.maxMeasurement!;
+			if ((value as bigint) > result.reportCount * bound)
+				throw new DAPError(
+					"InvalidResponse",
+					"Aggregate exceeds the measurement bound",
+				);
+		}
 		return {
 			status: "complete",
-			...(this.task.vdaf.type === "prio3-count"
-				? { count: value }
-				: { sum: value }),
+			...(Array.isArray(value)
+				? { histogram: Object.freeze(value) }
+				: this.task.vdaf.type === "prio3-count"
+					? { count: value as bigint }
+					: { sum: value as bigint }),
 			reportCount: result.reportCount,
 			interval: { start: result.start, duration: result.duration },
 		};
