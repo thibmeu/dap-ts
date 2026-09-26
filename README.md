@@ -111,33 +111,40 @@ exercise collection. For sum tasks, completed progress has `sum` instead of
 
 ## Aggregator primitive
 
-`dap-ts/aggregator` supports DAP 19 Prio3Count jobs with one or more reports.
+`dap-ts/aggregator` supports DAP 19 Prio3Count, Prio3Sum, and
+Prio3Histogram jobs with one or more reports.
 Each server uses its own HPKE private key and the shared VDAF
 verification key. The caller handles authentication, HTTP, storage, and retries.
 
 ```typescript
 import {
-  leaderCountBatchInit, helperCountBatchInit, leaderCountBatchFinish,
-  prepareAggregatorKey,
+  leaderPrio3BatchInit, helperPrio3BatchInit, leaderPrio3BatchFinish,
+  addPrio3OutputShare, prepareAggregatorKey,
 } from "dap-ts/aggregator";
 
 const leaderKey = await prepareAggregatorKey(leaderHpkeKey);
 const helperKey = await prepareAggregatorKey(helperHpkeKey);
-const leader = await leaderCountBatchInit(task, reports, leaderKey, 0, verifyKey);
-const helper = await helperCountBatchInit(task, leader.request, helperKey, 0, verifyKey);
-const results = leaderCountBatchFinish(leader.reports, helper.response);
+const leader = await leaderPrio3BatchInit(task, reports, leaderKey, 0, verifyKey);
+const helper = await helperPrio3BatchInit(task, leader.request, helperKey, 0, verifyKey);
+const results = leaderPrio3BatchFinish(task, leader.reports, helper.response);
+// In the host's atomic bucket update:
+if (results[0] && "outputShare" in results[0])
+  bucket.share = addPrio3OutputShare(task, bucket.share, results[0].outputShare);
 ```
 
 `leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
 `privateKey`. Prepare each key once when starting a server. Raw keys still work
 for occasional calls. Before sending `leader.request`, store it with
 `leader.reports`. Before sending `helper.response`, atomically check replay and
-collection state, add each accepted `helper.reports[].outputShare`, and cache the exact
-response. The Leader then validates the response and commits its share once.
+collection state for each report, add accepted Helper output shares once, and
+cache the exact response. The Leader then validates the response and commits
+each accepted output share once.
 Return cached bytes on retry; reject a reused job ID with different bytes.
 Keep a bucket with a pending Leader job out of collection. The host can encode
 replay or collected-bucket errors with `encodeCountJobRejection()`.
-The one-report functions remain available. Sum and Histogram verification are pending.
+Check each result for `outputShare` before adding it; rejected reports have
+`reportError`. The Count-specific functions remain available. Sinbad's
+current server example uses Count only.
 
 `npm run bench:aggregator` measures the local one-report Count path on Node,
 with raw and prepared keys. It excludes HTTP and storage. Compare deployments

@@ -1,4 +1,19 @@
 import {
+	addFieldOutputShare,
+	histogramVerifierMessage,
+	histogramVerifierShare,
+	sumVerifierMessage,
+	sumVerifierShare,
+} from "./aggregator-prio3.js";
+
+export {
+	histogramVerifierMessage,
+	histogramVerifierShare,
+	sumVerifierMessage,
+	sumVerifierShare,
+} from "./aggregator-prio3.js";
+
+import {
 	base64url,
 	bytes,
 	concat,
@@ -18,6 +33,7 @@ import {
 	type ReportMetadata,
 } from "./messages.js";
 import { expand, mod, P, requireBytes } from "./prio3-count.js";
+import { P128 } from "./prio3-histogram.js";
 import { Task } from "./task.js";
 
 const HALF = (P + 1n) / 2n;
@@ -195,9 +211,34 @@ export async function prepareAggregatorKey(key: {
 	};
 }
 
-/** Decrypt and validate one DAP 19 Count input share. */
-export async function openCountInputShare(
-	task: Task<number>,
+function shareLength(task: Task<unknown>, role: "leader" | "helper"): number {
+	if (role === "helper") return task.vdaf.type === "prio3-histogram" ? 64 : 32;
+	if (task.vdaf.type === "prio3-count") return 48;
+	if (task.vdaf.type === "prio3-sum") {
+		const bits = task.vdaf.maxMeasurement!.toString(2).length;
+		let p = 1;
+		while (p <= bits) p *= 2;
+		return 8 * (bits + 2 * p);
+	}
+	const { length, chunkLength } = task.vdaf;
+	const calls = Math.ceil(length! / chunkLength!);
+	let p = 1;
+	while (p <= calls) p *= 2;
+	return 16 * (length! + 2 * chunkLength! + 2 * p - 1) + 32;
+}
+
+function requirePrio3Task(task: Task<unknown>): void {
+	if (
+		!(task instanceof Task) ||
+		task.dapVersion !== 19 ||
+		!["prio3-count", "prio3-sum", "prio3-histogram"].includes(task.vdaf.type)
+	)
+		throw new DAPError("InvalidTask", "Expected a DAP 19 Prio3 task");
+}
+
+/** Decrypt and validate one DAP 19 Prio3 input share. */
+export async function openPrio3InputShare(
+	task: Task<unknown>,
 	role: "leader" | "helper",
 	metadata: ReportMetadata,
 	publicShare: Uint8Array,
@@ -205,18 +246,12 @@ export async function openCountInputShare(
 	key: AggregatorKey,
 	nowMs = Date.now(),
 ): Promise<Uint8Array> {
-	if (
-		!(task instanceof Task) ||
-		task.dapVersion !== 19 ||
-		task.vdaf.type !== "prio3-count"
-	) {
-		throw new DAPError("InvalidTask", "Expected a DAP 19 Count task");
-	}
+	requirePrio3Task(task);
 	if (ciphertext.configId !== key.configId)
 		throw new DAPError("InvalidHpkeConfig", "Unknown HPKE config ID");
 	if (key.privateKey instanceof Uint8Array) bytes(key.privateKey, 32);
 	bytes(metadata.id, 16);
-	bytes(publicShare, 0);
+	bytes(publicShare, task.vdaf.type === "prio3-histogram" ? 64 : 0);
 	if (metadata.publicExtensions.length)
 		throw new DAPError("InvalidReport", "Unsupported report extension");
 	if (metadata.time > BigInt(Number.MAX_SAFE_INTEGER))
@@ -272,16 +307,178 @@ export async function openCountInputShare(
 	const share = reader.vector(4, 1);
 	reader.end();
 	try {
-		if (role === "leader") elements(share, 6);
-		else bytes(share, 32);
+		bytes(share, shareLength(task, role));
+		if (role === "leader") {
+			if (task.vdaf.type === "prio3-count") elements(share, 6);
+			else if (task.vdaf.type === "prio3-sum") {
+				for (let offset = 0; offset < share.length; offset += 8)
+					elements(share.subarray(offset, offset + 8), 1);
+			} else {
+				const view = new DataView(
+					share.buffer,
+					share.byteOffset,
+					share.byteLength,
+				);
+				for (let offset = 0; offset < share.length - 32; offset += 16) {
+					const value =
+						view.getBigUint64(offset, true) |
+						(view.getBigUint64(offset + 8, true) << 64n);
+					if (value >= P128)
+						throw new RangeError("Non-canonical Field128 element");
+				}
+			}
+		}
 	} catch (cause) {
-		throw new DAPError("InvalidReport", "Invalid Count input share", { cause });
+		throw new DAPError("InvalidReport", "Invalid Prio3 input share", { cause });
 	}
 	return share;
 }
 
-function context(task: Task<number>): Uint8Array {
+export async function openCountInputShare(
+	task: Task<number>,
+	role: "leader" | "helper",
+	metadata: ReportMetadata,
+	publicShare: Uint8Array,
+	ciphertext: HpkeCiphertext,
+	key: AggregatorKey,
+	nowMs = Date.now(),
+): Promise<Uint8Array> {
+	if (task.vdaf.type !== "prio3-count")
+		throw new DAPError("InvalidTask", "Expected a Count task");
+	return openPrio3InputShare(
+		task,
+		role,
+		metadata,
+		publicShare,
+		ciphertext,
+		key,
+		nowMs,
+	);
+}
+
+function context(task: Task<unknown>): Uint8Array {
 	return concat(new TextEncoder().encode("dap-19"), decodeId(task.id, 32));
+}
+
+function leaderPrio3Init(
+	task: Task<unknown>,
+	verifyKey: Uint8Array,
+	nonce: Uint8Array,
+	publicShare: Uint8Array,
+	inputShare: Uint8Array,
+): { state: Uint8Array; outbound: Uint8Array } {
+	const ctx = context(task);
+	if (task.vdaf.type === "prio3-count")
+		return leaderCountInit(verifyKey, ctx, nonce, publicShare, inputShare);
+	if (task.vdaf.type === "prio3-sum") {
+		const share = sumVerifierShare(
+			0,
+			task.vdaf.maxMeasurement!,
+			verifyKey,
+			ctx,
+			nonce,
+			publicShare,
+			inputShare,
+		);
+		return {
+			state: share.outputShare,
+			outbound: pingPong(0, share.verifierShare),
+		};
+	}
+	const share = histogramVerifierShare(
+		0,
+		task.vdaf.length!,
+		task.vdaf.chunkLength!,
+		verifyKey,
+		ctx,
+		nonce,
+		publicShare,
+		inputShare,
+	);
+	return {
+		state: concat(share.outputShare, share.jointSeed),
+		outbound: pingPong(0, share.verifierShare),
+	};
+}
+
+function helperPrio3Init(
+	task: Task<unknown>,
+	verifyKey: Uint8Array,
+	nonce: Uint8Array,
+	publicShare: Uint8Array,
+	inputShare: Uint8Array,
+	inbound: Uint8Array,
+): { outputShare: Uint8Array; outbound: Uint8Array } {
+	const ctx = context(task);
+	if (task.vdaf.type === "prio3-count")
+		return helperCountInit(
+			verifyKey,
+			ctx,
+			nonce,
+			publicShare,
+			inputShare,
+			inbound,
+		);
+	if (task.vdaf.type === "prio3-sum") {
+		const leaderShare = readPingPong(inbound, 0, 24);
+		const helper = sumVerifierShare(
+			1,
+			task.vdaf.maxMeasurement!,
+			verifyKey,
+			ctx,
+			nonce,
+			publicShare,
+			inputShare,
+		);
+		return {
+			outputShare: helper.outputShare,
+			outbound: pingPong(
+				2,
+				sumVerifierMessage(leaderShare, helper.verifierShare),
+			),
+		};
+	}
+	const chunkLength = task.vdaf.chunkLength!;
+	const leaderShare = readPingPong(inbound, 0, (2 * chunkLength + 2) * 16 + 32);
+	const helper = histogramVerifierShare(
+		1,
+		task.vdaf.length!,
+		chunkLength,
+		verifyKey,
+		ctx,
+		nonce,
+		publicShare,
+		inputShare,
+	);
+	const message = histogramVerifierMessage(
+		leaderShare,
+		helper.verifierShare,
+		chunkLength,
+		ctx,
+	);
+	if (!message.every((byte, i) => byte === helper.jointSeed[i]))
+		throw new RangeError("Prio3Histogram joint randomness mismatch");
+	return { outputShare: helper.outputShare, outbound: pingPong(2, message) };
+}
+
+function leaderPrio3Finish(
+	task: Task<unknown>,
+	state: Uint8Array,
+	inbound: Uint8Array,
+): Uint8Array {
+	if (task.vdaf.type === "prio3-count")
+		return leaderCountFinish(state, inbound);
+	if (task.vdaf.type === "prio3-sum") {
+		bytes(state, 8);
+		readPingPong(inbound, 2, 0);
+		return state.slice();
+	}
+	const length = task.vdaf.length! * 16;
+	bytes(state, length + 32);
+	const message = readPingPong(inbound, 2, 32);
+	if (!message.every((byte, i) => byte === state[length + i]))
+		throw new RangeError("Prio3Histogram joint randomness mismatch");
+	return state.slice(0, length);
 }
 
 function countJobHeader(verificationKeyId: number): Uint8Array {
@@ -292,9 +489,9 @@ function countJobHeader(verificationKeyId: number): Uint8Array {
 	);
 }
 
-/** Build one DAP 19 aggregation initialization request; persist the returned bytes for retries. */
-export async function leaderCountJobInit(
-	task: Task<number>,
+/** Build one DAP 19 Prio3 aggregation initialization request. */
+export async function leaderPrio3JobInit(
+	task: Task<unknown>,
 	report: Report,
 	key: AggregatorKey,
 	verificationKeyId: number,
@@ -306,7 +503,7 @@ export async function leaderCountJobInit(
 	reportId: Uint8Array;
 	time: bigint;
 }> {
-	const input = await openCountInputShare(
+	const input = await openPrio3InputShare(
 		task,
 		"leader",
 		report.metadata,
@@ -315,9 +512,9 @@ export async function leaderCountJobInit(
 		key,
 		nowMs,
 	);
-	const { state, outbound } = leaderCountInit(
+	const { state, outbound } = leaderPrio3Init(
+		task,
 		verifyKey,
-		context(task),
 		report.metadata.id,
 		report.publicShare,
 		input,
@@ -340,9 +537,35 @@ export async function leaderCountJobInit(
 	};
 }
 
-/** Build one job from distinct Count reports, keeping per-report validation failures. */
-export async function leaderCountBatchInit(
+/** Count-compatible one-report entry point. */
+export async function leaderCountJobInit(
 	task: Task<number>,
+	report: Report,
+	key: AggregatorKey,
+	verificationKeyId: number,
+	verifyKey: Uint8Array,
+	nowMs = Date.now(),
+): Promise<{
+	request: Uint8Array;
+	state: Uint8Array;
+	reportId: Uint8Array;
+	time: bigint;
+}> {
+	if (task.vdaf.type !== "prio3-count")
+		throw new DAPError("InvalidTask", "Expected a Count task");
+	return leaderPrio3JobInit(
+		task,
+		report,
+		key,
+		verificationKeyId,
+		verifyKey,
+		nowMs,
+	);
+}
+
+/** Build one job from distinct Prio3 reports, keeping per-report validation failures. */
+export async function leaderPrio3BatchInit(
+	task: Task<unknown>,
 	reports: readonly Report[],
 	key: AggregatorKey,
 	verificationKeyId: number,
@@ -367,7 +590,7 @@ export async function leaderCountBatchInit(
 			throw new DAPError("InvalidMessage", "Duplicate report ID in job");
 		seen.add(id);
 		try {
-			const job = await leaderCountJobInit(
+			const job = await leaderPrio3JobInit(
 				task,
 				report,
 				key,
@@ -395,9 +618,29 @@ export async function leaderCountBatchInit(
 	return { request: concatParts(requestParts), reports: ready, rejected };
 }
 
-/** Verify each Count report in a job. The host commits and caches the response atomically. */
-export async function helperCountBatchInit(
+export async function leaderCountBatchInit(
 	task: Task<number>,
+	reports: readonly Report[],
+	key: AggregatorKey,
+	verificationKeyId: number,
+	verifyKey: Uint8Array,
+	nowMs = Date.now(),
+): ReturnType<typeof leaderPrio3BatchInit> {
+	if (task.vdaf.type !== "prio3-count")
+		throw new DAPError("InvalidTask", "Expected a Count task");
+	return leaderPrio3BatchInit(
+		task,
+		reports,
+		key,
+		verificationKeyId,
+		verifyKey,
+		nowMs,
+	);
+}
+
+/** Verify each Prio3 report in a job. The host commits and caches the response atomically. */
+export async function helperPrio3BatchInit(
+	task: Task<unknown>,
 	request: Uint8Array,
 	key: AggregatorKey,
 	verificationKeyId: number,
@@ -412,12 +655,13 @@ export async function helperCountBatchInit(
 		outputShare?: Uint8Array;
 	}[];
 }> {
+	requirePrio3Task(task);
 	const reader = new Reader(request);
 	const selectedKey = reader.uint(1);
 	if (reader.vector(4).length || reader.vector(2).length)
 		throw new DAPError(
 			"InvalidMessage",
-			"Expected empty Count parameter and job extensions",
+			"Expected empty Prio3 parameter and job extensions",
 		);
 	const entries = [];
 	const seen = new Set<string>();
@@ -463,7 +707,7 @@ export async function helperCountBatchInit(
 		}
 		let input: Uint8Array;
 		try {
-			input = await openCountInputShare(
+			input = await openPrio3InputShare(
 				task,
 				"helper",
 				metadata,
@@ -487,9 +731,9 @@ export async function helperCountBatchInit(
 			continue;
 		}
 		try {
-			const { outputShare, outbound } = helperCountInit(
+			const { outputShare, outbound } = helperPrio3Init(
+				task,
 				verifyKey,
-				context(task),
 				metadata.id,
 				publicShare,
 				input,
@@ -509,6 +753,26 @@ export async function helperCountBatchInit(
 		response: concatParts(results.map((result) => result.response)),
 		reports: results,
 	};
+}
+
+export async function helperCountBatchInit(
+	task: Task<number>,
+	request: Uint8Array,
+	key: AggregatorKey,
+	verificationKeyId: number,
+	verifyKey: Uint8Array,
+	nowMs = Date.now(),
+): ReturnType<typeof helperPrio3BatchInit> {
+	if (task.vdaf.type !== "prio3-count")
+		throw new DAPError("InvalidTask", "Expected a Count task");
+	return helperPrio3BatchInit(
+		task,
+		request,
+		key,
+		verificationKeyId,
+		verifyKey,
+		nowMs,
+	);
 }
 
 /** Process a one-report job. */
@@ -538,12 +802,19 @@ export async function helperCountJobInit(
 	return job.reports[0]!;
 }
 
-/** Parse the Helper's response and finish the Leader's Count verification. */
-export function leaderCountJobFinish(
+type FinishedReport = { outputShare: Uint8Array } | { reportError: number };
+type PendingReport = {
+	readonly reportId: Uint8Array;
+	readonly time: bigint;
+	readonly state: Uint8Array;
+};
+
+function finishJob(
 	state: Uint8Array,
 	reportId: Uint8Array,
 	response: Uint8Array,
-): { outputShare: Uint8Array } | { reportError: number } {
+	finish: (state: Uint8Array, inbound: Uint8Array) => Uint8Array,
+): FinishedReport {
 	const reader = new Reader(response);
 	const receivedId = reader.take(16);
 	if (!bytes(reportId, 16).every((byte, i) => byte === receivedId[i]))
@@ -560,21 +831,40 @@ export function leaderCountJobFinish(
 		throw new DAPError("InvalidMessage", "Expected continuation or rejection");
 	const inbound = reader.vector(4, 1);
 	reader.end();
-	return { outputShare: leaderCountFinish(state, inbound) };
+	return { outputShare: finish(state, inbound) };
 }
 
-/** Finish every report in response order, rejecting missing, extra, or reordered IDs. */
-export function leaderCountBatchFinish(
-	reports: readonly {
-		readonly reportId: Uint8Array;
-		readonly time: bigint;
-		readonly state: Uint8Array;
-	}[],
+/** Parse the Helper's response and finish the Leader's Count verification. */
+export function leaderCountJobFinish(
+	state: Uint8Array,
+	reportId: Uint8Array,
 	response: Uint8Array,
-): ({ reportId: Uint8Array; time: bigint } & (
-	| { outputShare: Uint8Array }
-	| { reportError: number }
-))[] {
+): FinishedReport {
+	return finishJob(state, reportId, response, leaderCountFinish);
+}
+
+/** Finish one Prio3 report after checking the Helper's report ID and response. */
+export function leaderPrio3JobFinish(
+	task: Task<unknown>,
+	state: Uint8Array,
+	reportId: Uint8Array,
+	response: Uint8Array,
+): FinishedReport {
+	requirePrio3Task(task);
+	return finishJob(state, reportId, response, (stored, inbound) =>
+		leaderPrio3Finish(task, stored, inbound),
+	);
+}
+
+function finishBatch(
+	reports: readonly PendingReport[],
+	response: Uint8Array,
+	finish: (
+		state: Uint8Array,
+		reportId: Uint8Array,
+		record: Uint8Array,
+	) => FinishedReport,
+): ({ reportId: Uint8Array; time: bigint } & FinishedReport)[] {
 	if (!reports.length)
 		throw new DAPError("InvalidMessage", "Expected at least one report");
 	const reader = new Reader(response);
@@ -590,11 +880,31 @@ export function leaderCountBatchFinish(
 		results.push({
 			reportId: report.reportId,
 			time: report.time,
-			...leaderCountJobFinish(report.state, report.reportId, record),
+			...finish(report.state, report.reportId, record),
 		});
 	}
 	reader.end();
 	return results;
+}
+
+/** Finish a Prio3 batch in response order. */
+export function leaderPrio3BatchFinish(
+	task: Task<unknown>,
+	reports: readonly PendingReport[],
+	response: Uint8Array,
+): ({ reportId: Uint8Array; time: bigint } & FinishedReport)[] {
+	requirePrio3Task(task);
+	return finishBatch(reports, response, (state, reportId, record) =>
+		leaderPrio3JobFinish(task, state, reportId, record),
+	);
+}
+
+/** Finish every Count report in response order. */
+export function leaderCountBatchFinish(
+	reports: readonly PendingReport[],
+	response: Uint8Array,
+): ({ reportId: Uint8Array; time: bigint } & FinishedReport)[] {
+	return finishBatch(reports, response, leaderCountJobFinish);
 }
 
 /** Add a verified Count output share to a stored aggregate share. */
@@ -603,4 +913,19 @@ export function addCountOutputShare(
 	next: Uint8Array,
 ): Uint8Array {
 	return encoded([mod(elements(current, 1)[0]! + elements(next, 1)[0]!)]);
+}
+
+/** Add canonical output shares for the task's Prio3 field and output length. */
+export function addPrio3OutputShare(
+	task: Task<unknown>,
+	current: Uint8Array,
+	next: Uint8Array,
+): Uint8Array {
+	requirePrio3Task(task);
+	const width = task.vdaf.type === "prio3-histogram" ? 16 : 8;
+	const length =
+		task.vdaf.type === "prio3-histogram" ? task.vdaf.length! * 16 : 8;
+	bytes(current, length);
+	bytes(next, length);
+	return addFieldOutputShare(current, next, width);
 }
