@@ -42,12 +42,12 @@ for (const rejection of result.rejected) {
 
 ## Usage
 
-The package uses ESM and Web APIs. It currently supports Prio3Count with
+The package uses ESM and Web APIs. It supports Prio3Count and Prio3Sum with
 time-interval batches, targeting DAP draft 19 and
 [VDAF draft 20](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-20.txt).
 
 - `Task.create()` configures a task; `Task.decode()` reads provisioned configuration bytes.
-- `prepareReport()` accepts `0` or `1`. `prepareReports()` prepares several measurements with bounded concurrency.
+- `prepareReport()` accepts `0` or `1` for count tasks. For sums, use `prio3Sum(maxMeasurement)` and report an integer from `0` through that bound. Sum measurements and bounds can be `bigint`.
 - `prepareUpload()` returns request metadata and a response processor for your own transport.
 - `execute()` sends a prepared upload once. Its options accept custom `fetch`, authentication `headers`, and an abort `signal`.
 - `result.accepted` and `result.rejected` describe individual outcomes. Request-level protocol failures throw `DAPError`.
@@ -58,9 +58,13 @@ retrying an uncertain network outcome.
 
 Binary codecs live in `dap-ts/messages`; Fetch helpers live in `dap-ts/fetch`.
 
+For a bounded sum, set `vdaf: prio3Sum(1337)` when creating the task and call
+`client.prepareReport(42)`. Import `prio3Sum` from `dap-ts`. Both aggregators
+must be provisioned with the same bound.
+
 ## Collection
 
-Count collection is a separate backend import. The collector HPKE key and HTTP
+Collection is a separate backend import. The collector HPKE key and HTTP
 credentials must stay on the backend. Both aggregators must have the matching
 collector HPKE configuration.
 
@@ -85,8 +89,9 @@ else saveForLater(progress.state);
 `collect()` polls up to 20 times by default and returns resumable state if the
 job is still pending or the server asks it to wait more than one minute. Pass
 that state to `collect()` later. The collector
-supports the DAP 19 Prio3Count profile; the Janus DAP 18 upload test does not
+supports the DAP 19 Prio3Count and Prio3Sum profiles; the Janus DAP 18 upload test does not
 exercise collection.
+For sum tasks, completed progress has `sum` instead of `count`; both are `bigint`.
 
 ## Security considerations
 

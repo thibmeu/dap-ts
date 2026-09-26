@@ -17,6 +17,7 @@ import {
 	type HpkeConfig,
 } from "./messages.js";
 import { shardCountWithRandomness } from "./prio3-count.js";
+import { shardSumWithRandomness, validateSumMeasurement } from "./prio3-sum.js";
 import {
 	type PreparedReport,
 	preparedReport,
@@ -237,11 +238,29 @@ export class DAPClient<M> {
 		measurement: M,
 		options: PrepareReportOptions = {},
 	): Promise<PreparedReport> {
-		if (measurement !== 0 && measurement !== 1)
+		if (
+			this.task.vdaf.type === "prio3-count" &&
+			measurement !== 0 &&
+			measurement !== 1
+		)
 			throw new DAPError(
 				"InvalidMeasurement",
 				"Count measurement must be 0 or 1",
 			);
+		if (this.task.vdaf.type === "prio3-sum") {
+			try {
+				validateSumMeasurement(
+					measurement as number | bigint,
+					this.task.vdaf.maxMeasurement!,
+				);
+			} catch (cause) {
+				throw new DAPError(
+					"InvalidMeasurement",
+					"Sum measurement is outside its bound",
+					{ cause },
+				);
+			}
+		}
 		const milliseconds =
 			options.time instanceof Date
 				? options.time.getTime()
@@ -282,12 +301,22 @@ export class DAPClient<M> {
 		const ctx = concat(new TextEncoder().encode(dapVersion), taskId);
 		let shares: ReturnType<typeof shardCountWithRandomness>;
 		try {
-			shares = shardCountWithRandomness(
-				measurement as number,
-				ctx,
-				nonce,
-				rand,
-			);
+			try {
+				shares =
+					this.task.vdaf.type === "prio3-count"
+						? shardCountWithRandomness(measurement as number, ctx, nonce, rand)
+						: shardSumWithRandomness(
+								measurement as number | bigint,
+								this.task.vdaf.maxMeasurement!,
+								ctx,
+								nonce,
+								rand,
+							);
+			} catch (cause) {
+				if (cause instanceof RangeError || cause instanceof TypeError)
+					throw new DAPError("InvalidMeasurement", cause.message, { cause });
+				throw cause;
+			}
 		} finally {
 			rand.fill(0);
 		}

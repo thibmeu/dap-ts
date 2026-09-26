@@ -15,6 +15,7 @@ import {
 	encodeCollectionJobRequest,
 } from "./messages.js";
 import { unshardCount } from "./prio3-count.js";
+import { unshardSum } from "./prio3-sum.js";
 import { Task } from "./task.js";
 
 export interface CollectionQuery {
@@ -36,12 +37,14 @@ export type CollectionProgress =
 			readonly state: CollectionState;
 			readonly retryAfter: number | undefined;
 	  }
-	| {
+	| ({
 			readonly status: "complete";
-			readonly count: bigint;
 			readonly reportCount: bigint;
 			readonly interval: { readonly start: bigint; readonly duration: bigint };
-	  };
+	  } & (
+			| { readonly count: bigint; readonly sum?: never }
+			| { readonly sum: bigint; readonly count?: never }
+	  ));
 
 export interface PreparedCollection {
 	readonly request: DAPRequest;
@@ -56,13 +59,13 @@ export interface CollectorOptions {
 }
 
 export class Collector {
-	readonly task: Task<number>;
+	readonly task: Task<number | bigint>;
 	#configId: number;
 	#suite = createSuite();
 	#key: Promise<CryptoKey>;
 	#creationUrl: string;
 
-	constructor(task: Task<number>, options: CollectorOptions) {
+	constructor(task: Task<number | bigint>, options: CollectorOptions) {
 		if (!(task instanceof Task) || task.dapVersion !== 19)
 			throw new DAPError("InvalidTask", "Collector requires a DAP 19 task");
 		if (
@@ -256,19 +259,31 @@ export class Collector {
 				);
 			}
 		}
-		let count: bigint;
+		let value: bigint;
 		try {
-			count = unshardCount(shares as [Uint8Array, Uint8Array]);
+			value =
+				this.task.vdaf.type === "prio3-count"
+					? unshardCount(shares as [Uint8Array, Uint8Array])
+					: unshardSum(shares as [Uint8Array, Uint8Array]);
 		} catch (cause) {
-			throw new DAPError("InvalidResponse", "Malformed count aggregate share", {
+			throw new DAPError("InvalidResponse", "Malformed aggregate share", {
 				cause,
 			});
 		}
-		if (count > result.reportCount)
-			throw new DAPError("InvalidResponse", "Count exceeds the report count");
+		const bound =
+			this.task.vdaf.type === "prio3-count"
+				? 1n
+				: this.task.vdaf.maxMeasurement!;
+		if (value > result.reportCount * bound)
+			throw new DAPError(
+				"InvalidResponse",
+				"Aggregate exceeds the measurement bound",
+			);
 		return {
 			status: "complete",
-			count,
+			...(this.task.vdaf.type === "prio3-count"
+				? { count: value }
+				: { sum: value }),
 			reportCount: result.reportCount,
 			interval: { start: result.start, duration: result.duration },
 		};

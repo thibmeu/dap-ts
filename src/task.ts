@@ -1,4 +1,4 @@
-import { base64url, bytes, decodeId, Reader } from "./binary.js";
+import { base64url, bytes, decodeId, Reader, uint } from "./binary.js";
 import { DAPError } from "./errors.js";
 import {
 	type DecodeOptions,
@@ -8,6 +8,7 @@ import {
 	type TaskConfiguration,
 } from "./messages.js";
 import { type ClientVdaf, prio3Count } from "./prio3-count.js";
+import { prio3Sum } from "./prio3-sum.js";
 
 export interface TaskOptions<M> {
 	readonly id: string;
@@ -102,11 +103,22 @@ export class Task<M> {
 				"Only time-interval batches are supported",
 			);
 		}
-		if (configuration.vdafType !== 1 || configuration.vdafConfig.length) {
-			throw new DAPError(
-				"UnsupportedVdaf",
-				"Expected Prio3Count with empty configuration",
-			);
+		let vdaf: ClientVdaf<unknown>;
+		if (configuration.vdafType === 1 && !configuration.vdafConfig.length) {
+			vdaf = prio3Count();
+		} else if (
+			configuration.vdafType === 2 &&
+			configuration.vdafConfig.length === 8 &&
+			!testOnly
+		) {
+			const limit = new Reader(configuration.vdafConfig).u64();
+			try {
+				vdaf = prio3Sum(limit);
+			} catch (cause) {
+				throw new DAPError("InvalidTask", "Invalid Prio3Sum bound", { cause });
+			}
+		} else {
+			throw new DAPError("UnsupportedVdaf", "Unsupported VDAF configuration");
 		}
 		for (const extension of configuration.extensions) {
 			if (extension.type !== 1)
@@ -120,14 +132,20 @@ export class Task<M> {
 			}
 			this.#interval = { start, end: start + duration };
 		}
-		this.vdaf = prio3Count() as ClientVdaf<M>;
+		this.vdaf = vdaf as ClientVdaf<M>;
 		this.#info = configuration.info.slice();
 		this.#configuration = encoded.slice();
 		Object.freeze(this);
 	}
 
 	static create<M>(options: TaskOptions<M>): Task<M> {
-		if (options.vdaf !== prio3Count())
+		if (
+			options.vdaf !== prio3Count() &&
+			(options.vdaf?.type !== "prio3-sum" ||
+				options.vdaf.maxMeasurement === undefined ||
+				options.vdaf !== prio3Sum(options.vdaf.maxMeasurement) ||
+				options.testOnly)
+		)
 			throw new DAPError("UnsupportedVdaf", "Use a built-in VDAF factory");
 		if (options.batchMode !== "time-interval")
 			throw new DAPError("InvalidTask", "Unsupported batch mode");
@@ -158,8 +176,11 @@ export class Task<M> {
 			minBatchSize: BigInt(options.minBatchSize),
 			batchMode: 1,
 			batchConfig: new Uint8Array(),
-			vdafType: 1,
-			vdafConfig: new Uint8Array(),
+			vdafType: options.vdaf.type === "prio3-count" ? 1 : 2,
+			vdafConfig:
+				options.vdaf.type === "prio3-count"
+					? new Uint8Array()
+					: uint(options.vdaf.maxMeasurement!, 8),
 			extensions: options.extensions ?? [],
 		};
 		return new Task<M>(
@@ -180,7 +201,7 @@ export class Task<M> {
 	}
 
 	expect<N>(vdaf: ClientVdaf<N>): Task<N> {
-		if (vdaf !== prio3Count())
+		if ((vdaf as unknown) !== this.vdaf)
 			throw new DAPError("UnsupportedVdaf", "Task VDAF does not match");
 		return this as unknown as Task<N>;
 	}

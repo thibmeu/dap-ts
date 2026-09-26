@@ -13,6 +13,7 @@ export { DAPError, isDAPError } from "./errors.js";
 export type { AggregatorHpkeConfigs, RandomSource } from "./hpke.js";
 export { HpkeConfigList } from "./hpke.js";
 export { prio3Count } from "./prio3-count.js";
+export { prio3Sum } from "./prio3-sum.js";
 export type { PreparedReport, ReportId } from "./reports.js";
 export type { EncodedTask, TaskOptions } from "./task.js";
 export { Task } from "./task.js";

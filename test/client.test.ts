@@ -1,7 +1,13 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { concat, decodeId, Reader } from "../src/binary.js";
 import { createSuite } from "../src/hpke.js";
-import { DAPClient, DAPError, HpkeConfigList, Task } from "../src/index.js";
+import {
+	DAPClient,
+	DAPError,
+	HpkeConfigList,
+	prio3Sum,
+	Task,
+} from "../src/index.js";
 import {
 	decodeReport,
 	encodeHpkeConfigList,
@@ -9,6 +15,7 @@ import {
 	encodeReport,
 } from "../src/messages.js";
 import { shardCountWithRandomness } from "../src/prio3-count.js";
+import { shardSumWithRandomness } from "../src/prio3-sum.js";
 import {
 	config,
 	deterministicRandom,
@@ -99,6 +106,65 @@ it("prepares an encrypted count report with the exact DAP task/role binding", as
 		clock: () => 179999,
 	}).prepareReport(1);
 	expect(encodeReport(same)).toEqual(encodeReport(prepared));
+});
+
+it("round-trips a bounded sum task and encrypts its published VDAF shares", async () => {
+	const sumTask = Task.create({ ...taskOptions, vdaf: prio3Sum(1337) });
+	expect(sumTask.encodeConfiguration()).toEqual(
+		Task.decode({
+			id: sumTask.id,
+			configuration: sumTask.encodeConfiguration(),
+		})
+			.expect(prio3Sum(1337))
+			.encodeConfiguration(),
+	);
+	expect(() =>
+		Task.decode({
+			id: sumTask.id,
+			configuration: sumTask.encodeConfiguration(),
+		}).expect(prio3Sum(255)),
+	).toThrow();
+	const client = new DAPClient(sumTask, {
+		hpke,
+		random: deterministicRandom(),
+		clock: () => 179999,
+	});
+	for (const invalid of [-1, 1338, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		await expect(client.prepareReport(invalid)).rejects.toMatchObject({
+			code: "InvalidMeasurement",
+		});
+	}
+	const prepared = await client.prepareReport(1337);
+	const report = decodeReport(encodeReport(prepared));
+	const taskId = decodeId(sumTask.id, 32);
+	const expected = shardSumWithRandomness(
+		1337,
+		1337,
+		concat(text("dap-19"), taskId),
+		report.metadata.id,
+		Uint8Array.from({ length: 64 }, (_, i) => i + 16),
+	);
+	const aad = encodeInputShareAad(
+		taskId,
+		sumTask.encodeConfiguration(),
+		report.metadata,
+		report.publicShare,
+	);
+	for (const [i, ciphertext] of [report.leader, report.helper].entries()) {
+		const plaintext = await suite.Open(
+			privateKey,
+			ciphertext.enc,
+			ciphertext.payload,
+			{
+				info: concat(text("dap-19 input share"), Uint8Array.of(1, i + 2)),
+				aad,
+			},
+		);
+		const reader = new Reader(plaintext);
+		expect(reader.vector(2)).toEqual(new Uint8Array());
+		expect(reader.vector(4)).toEqual(expected.inputShares[i]);
+		reader.end();
+	}
 });
 
 it("snapshots extensions before encryption and detects duplicate scopes", async () => {

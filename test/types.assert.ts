@@ -3,6 +3,7 @@ import {
 	type DAPClientOptions,
 	type PreparedReport,
 	prio3Count,
+	prio3Sum,
 	Task,
 } from "../src/index.js";
 
@@ -29,6 +30,22 @@ export async function check(options: DAPClientOptions) {
 		configuration: task.encodeConfiguration(),
 	}).expect(prio3Count());
 	const narrowed = new DAPClient(decoded, options);
+	const sum = new DAPClient(
+		Task.create({
+			id: task.id,
+			leader: task.leader,
+			helper: task.helper,
+			timePrecision: 60,
+			minBatchSize: 100,
+			batchMode: "time-interval",
+			vdaf: prio3Sum(1337),
+		}),
+		options,
+	);
+	await sum.prepareReport(42n);
+	await sum.prepareReport(42);
+	// @ts-expect-error Sum measurements are integers, not strings.
+	await sum.prepareReport("42");
 	// @ts-expect-error expect() restores the measurement type.
 	await narrowed.prepareReport(true);
 	// @ts-expect-error Reports must be prepared by a client.

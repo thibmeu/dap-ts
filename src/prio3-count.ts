@@ -2,7 +2,8 @@ import { turboshake128 } from "@noble/hashes/sha3-addons.js";
 
 declare const measurementType: unique symbol;
 export interface ClientVdaf<M> {
-	readonly type: "prio3-count";
+	readonly type: "prio3-count" | "prio3-sum";
+	readonly maxMeasurement?: bigint;
 	readonly [measurementType]: M;
 }
 const count = Object.freeze({ type: "prio3-count" }) as ClientVdaf<number>;
@@ -13,16 +14,16 @@ export function prio3Count(): ClientVdaf<number> {
 }
 
 // VDAF draft 20, Sections 6.1.4 and 7.4.1.
-const P = 0xffff_ffff_0000_0001n;
+export const P = 0xffff_ffff_0000_0001n;
 const HALF = (P + 1n) / 2n;
 // 7^((P - 1) / 4) mod P, the specified principal fourth root of unity.
 const ROOT4 = 281474976710656n;
 
-function mod(value: bigint): bigint {
+export function mod(value: bigint): bigint {
 	return ((value % P) + P) % P;
 }
 
-function requireBytes(value: Uint8Array, length?: number): void {
+export function requireBytes(value: Uint8Array, length?: number): void {
 	if (!(value instanceof Uint8Array)) throw new TypeError("Expected bytes");
 	if (length !== undefined && value.length !== length) {
 		throw new RangeError(`Expected ${length} bytes`);
@@ -47,16 +48,17 @@ export function xof(seed: Uint8Array, dst: Uint8Array, binder: Uint8Array) {
 		.update(binder);
 }
 
-function expand(
+export function expand(
 	seed: Uint8Array,
 	ctx: Uint8Array,
 	usage: number,
 	binder: Uint8Array,
 	length: number,
+	vdafId = 1,
 ): bigint[] {
-	// Draft 20 retains VERSION=18. Class=0, Prio3Count ID=1.
+	// Draft 20 retains VERSION=18. Class=0; the VDAF ID separates variants.
 	const dst = new Uint8Array(8 + ctx.length);
-	dst.set([18, 0, 0, 0, 0, 1, 0, usage]);
+	dst.set([18, 0, 0, 0, 0, vdafId, 0, usage]);
 	dst.set(ctx, 8);
 	const stream = xof(seed, dst, binder);
 	const bytes = new Uint8Array(8);

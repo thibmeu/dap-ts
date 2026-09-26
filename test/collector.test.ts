@@ -3,6 +3,7 @@ import { concat, uint, vector } from "../src/binary.js";
 import { Collector } from "../src/collector.js";
 import { collect, executeCollection } from "../src/collector-fetch.js";
 import { createSuite } from "../src/hpke.js";
+import { prio3Sum, Task } from "../src/index.js";
 import {
 	decodeCollectionJobRequest,
 	decodeCollectionJobResponse,
@@ -105,6 +106,63 @@ it("encodes the DAP 19 time-interval count collection request", () => {
 	]) {
 		expect(() => decodeCollectionJobRequest(malformed)).toThrow();
 	}
+});
+
+it("decrypts bounded sum shares and rejects results above the batch bound", async () => {
+	const sumTask = Task.create({
+		id: task.id,
+		leader: task.leader,
+		helper: task.helper,
+		timePrecision: task.timePrecision,
+		minBatchSize: task.minBatchSize,
+		batchMode: "time-interval",
+		vdaf: prio3Sum(1337),
+	});
+	const { suite, pair, privateKey } = await keys();
+	const collector = new Collector(sumTask, { configId: 7, privateKey });
+	const prepared = collector.prepare({ start: 10, duration: 2 });
+	const aad = concat(
+		Uint8Array.fromBase64(sumTask.id, { alphabet: "base64url" }),
+		sumTask.encodeConfiguration(),
+		prepared.request.body!,
+	);
+	const seal = async (role: number, value: bigint) => {
+		const share = new Uint8Array(8);
+		new DataView(share.buffer).setBigUint64(0, value, true);
+		const ciphertext = await suite.Seal(pair.publicKey, share, {
+			info: concat(
+				text.encode("dap-19 aggregate share"),
+				Uint8Array.of(role, 0),
+			),
+			aad,
+		});
+		return concat(
+			uint(7, 1),
+			vector(ciphertext.encapsulatedSecret, 2),
+			vector(ciphertext.ciphertext, 4),
+		);
+	};
+	const response = async (sum: bigint) => ({
+		status: 200,
+		headers: {
+			location: `/tasks/${sumTask.id}/collection_jobs/${jobId}`,
+			"content-type": "application/ppm-dap;message=collection-job-resp",
+		},
+		body: concat(
+			uint(100, 8),
+			uint(10, 8),
+			uint(2, 8),
+			await seal(2, 25n),
+			await seal(3, sum - 25n),
+		),
+	});
+	await expect(prepared.process(await response(1521n))).resolves.toMatchObject({
+		status: "complete",
+		sum: 1521n,
+	});
+	await expect(prepared.process(await response(133701n))).rejects.toMatchObject(
+		{ code: "InvalidResponse" },
+	);
 });
 
 it("decrypts role-bound aggregate shares into an exact bigint count", async () => {
