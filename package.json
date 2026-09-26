@@ -37,7 +37,8 @@
     "test:janus": "test/janus.sh",
     "lint": "biome check src test",
     "format": "biome format --write src test",
-    "bench": "npm run build && node bench/count.mjs"
+    "bench": "npm run build && node bench/count.mjs",
+    "bench:aggregator": "npm run build && node --expose-gc bench/aggregator.mjs"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",

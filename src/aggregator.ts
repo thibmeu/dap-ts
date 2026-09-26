@@ -1,6 +1,5 @@
 import { bytes, concat, decodeId, Reader, uint, vector } from "./binary.js";
 import { DAPError } from "./errors.js";
-import { fieldPower, transform } from "./field.js";
 import { createSuite } from "./hpke.js";
 import {
 	encodeInputShareAad,
@@ -14,6 +13,7 @@ import { Task } from "./task.js";
 
 const HALF = (P + 1n) / 2n;
 const ROOT4 = 281474976710656n;
+const suite = createSuite();
 
 function elements(input: Uint8Array, length: number): bigint[] {
 	requireBytes(input, length * 8);
@@ -34,13 +34,6 @@ function encoded(values: bigint[]): Uint8Array {
 	return output;
 }
 
-function evaluate(values: bigint[], point: bigint): bigint {
-	return transform(values, values.length, P, true).reduceRight(
-		(acc, coefficient) => mod(acc * point + coefficient),
-		0n,
-	);
-}
-
 /** Compute one aggregator's Prio3Count verifier share (VDAF draft 20, Section 7.3.3). */
 export function countVerifierShare(
 	aggregatorId: 0 | 1,
@@ -58,8 +51,7 @@ export function countVerifierShare(
 	requireBytes(publicShare, 0);
 	requireBytes(inputShare, aggregatorId === 0 ? 48 : 32);
 	const [point] = expand(verifyKey, context, 5, Uint8Array.of(1, ...nonce), 1);
-	if (fieldPower(point!, 2n, P) === 1n)
-		throw new RangeError("Invalid query point");
+	if (mod(point! * point!) === 1n) throw new RangeError("Invalid query point");
 	const measurement =
 		aggregatorId === 0
 			? elements(inputShare.subarray(0, 8), 1)[0]!
@@ -72,10 +64,13 @@ export function countVerifierShare(
 	const wire = [0, 1].map((i) =>
 		mod((proof[i]! + measurement + (proof[i]! - measurement) * point!) * HALF),
 	);
-	const gadget = proof.slice(2);
-	const weighted = mod(gadget[0]! + gadget[1]! * ROOT4 - gadget[2]!);
-	gadget.push(mod(-weighted * fieldPower(mod(-ROOT4), P - 2n, P)));
-	return encoded([validity, ...wire, evaluate(gadget, point!)]);
+	// The gadget polynomial has degree two and evaluations at 1, i, and -1.
+	// Direct interpolation avoids a per-report inverse NTT and modular powers.
+	const slope = mod((proof[2]! - proof[4]!) * HALF);
+	const ends = mod((proof[2]! + proof[4]!) * HALF);
+	const quadratic = mod((ends + slope * ROOT4 - proof[3]!) * HALF);
+	const gadget = mod((quadratic * point! + slope) * point! + ends - quadratic);
+	return encoded([validity, ...wire, gadget]);
 }
 
 /** Check the two verifier shares. Count's verifier message is empty. */
@@ -166,7 +161,29 @@ export function leaderCountFinish(
 
 export interface AggregatorKey {
 	readonly configId: number;
+	readonly privateKey: Uint8Array | CryptoKey;
+}
+
+/** Encode a per-report DAP rejection after a host replay or collected-bucket check. */
+export function encodeCountJobRejection(
+	reportId: Uint8Array,
+	code: number,
+): Uint8Array {
+	if (!Number.isInteger(code) || code < 1 || code > 10)
+		throw new DAPError("InvalidMessage", "Invalid report error");
+	return concat(bytes(reportId, 16), uint(2, 1), uint(code, 1));
+}
+
+/** Deserialize once at service startup to avoid repeating X25519 key setup per report. */
+export async function prepareAggregatorKey(key: {
+	readonly configId: number;
 	readonly privateKey: Uint8Array;
+}): Promise<{ configId: number; privateKey: CryptoKey }> {
+	uint(key.configId, 1);
+	return {
+		configId: key.configId,
+		privateKey: await suite.DeserializePrivateKey(bytes(key.privateKey, 32)),
+	};
 }
 
 /** Decrypt and validate one DAP 19 Count input share. */
@@ -187,7 +204,7 @@ export async function openCountInputShare(
 	}
 	if (ciphertext.configId !== key.configId)
 		throw new DAPError("InvalidHpkeConfig", "Unknown HPKE config ID");
-	bytes(key.privateKey, 32);
+	if (key.privateKey instanceof Uint8Array) bytes(key.privateKey, 32);
 	bytes(metadata.id, 16);
 	bytes(publicShare, 0);
 	if (metadata.publicExtensions.length)
@@ -206,10 +223,12 @@ export async function openCountInputShare(
 		new TextEncoder().encode("dap-19 input share"),
 		Uint8Array.of(1, role === "leader" ? 2 : 3),
 	);
-	const suite = createSuite();
 	let plaintext: Uint8Array;
 	try {
-		const privateKey = await suite.DeserializePrivateKey(key.privateKey);
+		const privateKey =
+			key.privateKey instanceof Uint8Array
+				? await suite.DeserializePrivateKey(key.privateKey)
+				: key.privateKey;
 		plaintext = await suite.Open(
 			privateKey,
 			ciphertext.enc,
@@ -323,7 +342,7 @@ export async function helperCountJobInit(
 	const inbound = reader.vector(4, 1);
 	reader.end();
 	const reject = (code: number) => ({
-		response: concat(metadata.id, Uint8Array.of(2, code)),
+		response: encodeCountJobRejection(metadata.id, code),
 		reportId: metadata.id,
 		time: metadata.time,
 	});

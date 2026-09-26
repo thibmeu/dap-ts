@@ -22,7 +22,8 @@ const HALF = (P + 1n) / 2n;
 const ROOT4 = 281474976710656n;
 
 export function mod(value: bigint): bigint {
-	return ((value % P) + P) % P;
+	const remainder = value % P;
+	return remainder < 0n ? remainder + P : remainder;
 }
 
 export function requireBytes(value: Uint8Array, length?: number): void {

@@ -118,11 +118,14 @@ verification key. The caller handles authentication, HTTP, storage, and retries.
 ```typescript
 import {
   leaderCountJobInit, helperCountJobInit, leaderCountJobFinish,
+  prepareAggregatorKey,
 } from "dap-ts/aggregator";
 
-const leader = await leaderCountJobInit(task, report, leaderHpkeKey, 0, verifyKey);
+const leaderKey = await prepareAggregatorKey(leaderHpkeKey);
+const helperKey = await prepareAggregatorKey(helperHpkeKey);
+const leader = await leaderCountJobInit(task, report, leaderKey, 0, verifyKey);
 // Persist leader.request, leader.state, leader.reportId, and leader.time.
-const helper = await helperCountJobInit(task, leader.request, helperHpkeKey, 0, verifyKey);
+const helper = await helperCountJobInit(task, leader.request, helperKey, 0, verifyKey);
 // If helper.outputShare exists, atomically claim the report and add the share
 // to its time bucket. Save helper.response before sending it to the leader.
 const result = leaderCountJobFinish(leader.state, leader.reportId, helper.response);
@@ -132,11 +135,19 @@ if ("outputShare" in result) {
 ```
 
 `leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
-`privateKey`. The host must cache a response for each exact request body and
-return it on retry. Report claims, bucket collection checks, and output-share
-updates must be one atomic transaction per role. A response must not be sent
-before its helper output share and cached response are durable. This first
-slice has no multi-report jobs or Sum/Histogram verification.
+`privateKey`. Prepare each key once when starting a server. Raw keys still work
+for occasional calls. The host must cache a response for each job ID and exact
+request body and return it on retry. A reused job ID with different bytes must
+fail. Report claims, bucket collection checks, output-share updates, and the
+cached response must be one atomic transaction per role. The Leader must also
+keep a bucket with a pending job out of collection. A response must not be sent
+before the Helper's output share and cached response are durable. The host can
+encode replay or collected-bucket errors with `encodeCountJobRejection()`.
+This first slice has no multi-report jobs or Sum/Histogram verification.
+
+`npm run bench:aggregator` measures the local one-report Count path on Node,
+with raw and prepared keys. It excludes HTTP and storage. Compare deployments
+using the same task, report count, hardware, concurrency, and persistence mode.
 
 ## Security considerations
 
