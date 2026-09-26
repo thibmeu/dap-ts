@@ -117,37 +117,26 @@ verification key. The caller handles authentication, HTTP, storage, and retries.
 
 ```typescript
 import {
-  leaderCountJobInit, helperCountJobInit,
+  leaderCountJobInit, helperCountJobInit, leaderCountJobFinish,
   prepareAggregatorKey,
 } from "dap-ts/aggregator";
 
 const leaderKey = await prepareAggregatorKey(leaderHpkeKey);
 const helperKey = await prepareAggregatorKey(helperHpkeKey);
-const leader = await leaderStore.loadLeader(jobId) ?? await leaderStore.saveLeader(
-  jobId, await leaderCountJobInit(task, report, leaderKey, 0, verifyKey),
-);
-const response = await helperStore.loadHelper(jobId, leader.request)
-  ?? await helperStore.commitHelper(
-    jobId, leader.request,
-    await helperCountJobInit(task, leader.request, helperKey, 0, verifyKey),
-  );
-await leaderStore.commitLeader(jobId, response);
+const leader = await leaderCountJobInit(task, report, leaderKey, 0, verifyKey);
+const helper = await helperCountJobInit(task, leader.request, helperKey, 0, verifyKey);
+const result = leaderCountJobFinish(leader.state, leader.reportId, helper.response);
 ```
-
-`CountLeaderStore` and `CountHelperStore` are TypeScript interfaces for the
-application's storage adapter. Each instance is scoped to one task and one
-role. The methods can use a SQL database, a single-writer service, or an
-in-memory store in tests; dap-ts provides no database implementation.
 
 `leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
 `privateKey`. Prepare each key once when starting a server. Raw keys still work
-for occasional calls. The host must cache a response for each job ID and exact
-request body and return it on retry. A reused job ID with different bytes must
-fail. Report claims, bucket collection checks, output-share updates, and the
-cached response must be one atomic transaction per role. The Leader must also
-keep a bucket with a pending job out of collection. A response must not be sent
-before the Helper's output share and cached response are durable. The host can
-encode replay or collected-bucket errors with `encodeCountJobRejection()`.
+for occasional calls. Before sending `leader.request`, store it with
+`leader.state`. Before sending `helper.response`, atomically check replay and
+collection state, add `helper.outputShare` if present, and cache the exact
+response. The Leader then validates the response and commits its share once.
+Return cached bytes on retry; reject a reused job ID with different bytes.
+Keep a bucket with a pending Leader job out of collection. The host can encode
+replay or collected-bucket errors with `encodeCountJobRejection()`.
 This first slice has no multi-report jobs or Sum/Histogram verification.
 
 `npm run bench:aggregator` measures the local one-report Count path on Node,

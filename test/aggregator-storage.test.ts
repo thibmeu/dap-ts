@@ -1,9 +1,5 @@
 import { expect, it } from "vitest";
 import {
-	type CountHelperJob,
-	type CountHelperStore,
-	type CountLeaderJob,
-	type CountLeaderStore,
 	encodeCountJobRejection,
 	helperCountJobInit,
 	leaderCountJobFinish,
@@ -16,9 +12,12 @@ import { P, unshardCount } from "../src/prio3-count.js";
 import { deterministicRandom, hpke, task } from "./fixtures.js";
 import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 
+type CountLeaderJob = Awaited<ReturnType<typeof leaderCountJobInit>>;
+type CountHelperJob = Awaited<ReturnType<typeof helperCountJobInit>>;
+
 // One synchronous method stands in for each database transaction. A real store
 // needs unique report/job indexes and a transaction around these same checks.
-class MemoryStore implements CountLeaderStore, CountHelperStore {
+class MemoryStore {
 	jobs = new Map<
 		string,
 		{ request: Uint8Array; response?: Uint8Array; leader?: CountLeaderJob }
