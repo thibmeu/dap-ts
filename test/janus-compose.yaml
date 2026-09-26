@@ -1,19 +1,19 @@
 services:
   leader:
-    image: dap-ts-janus:64e2581
+    image: ${JANUS_IMAGE:-dap-ts-janus:64e2581}
     build:
       context: ${JANUS_SOURCE}
       dockerfile: Dockerfile.interop_aggregator
       args:
-        PROFILE: ci
+        PROFILE: ${JANUS_PROFILE:-ci}
     ports:
       - "9001:8080"
   helper:
-    image: dap-ts-janus:64e2581
+    image: ${JANUS_IMAGE:-dap-ts-janus:64e2581}
     build:
       context: ${JANUS_SOURCE}
       dockerfile: Dockerfile.interop_aggregator
       args:
-        PROFILE: ci
+        PROFILE: ${JANUS_PROFILE:-ci}
     ports:
       - "9002:8080"
