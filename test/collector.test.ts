@@ -1,7 +1,6 @@
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import { concat, uint, vector } from "../src/binary.js";
 import { Collector } from "../src/collector.js";
-import { collect, executeCollection } from "../src/collector-fetch.js";
 import { createSuite } from "../src/hpke.js";
 import { prio3Sum, Task } from "../src/index.js";
 import {
@@ -270,75 +269,4 @@ it("rejects wrong collection locations and malformed responses", async () => {
 		collector.resume({ location, start: "010", duration: "2" }),
 	).toThrow();
 	expect(() => decodeCollectionJobResponse(new Uint8Array(23))).toThrow();
-});
-
-it("sends authenticated requests, polls with a bound, and returns resumable state", async () => {
-	const { privateKey } = await keys();
-	const collector = new Collector(task, { configId: 7, privateKey });
-	const fetch = vi.fn(async (request: Request) => {
-		expect(request.headers.get("authorization")).toBe("Bearer test");
-		return new Response(null, {
-			status: 200,
-			headers: request.method === "POST" ? { location } : {},
-		});
-	});
-	const result = await collect(
-		collector,
-		{ start: 10, duration: 2 },
-		{
-			fetch,
-			headers: { authorization: "Bearer test" },
-			maxPolls: 2,
-			minDelayMs: 0,
-		},
-	);
-	expect(result.status).toBe("pending");
-	expect(fetch.mock.calls.map(([request]) => request.method)).toEqual([
-		"POST",
-		"GET",
-		"GET",
-	]);
-	if (result.status !== "pending") return;
-	await executeCollection(collector.resume(result.state), {
-		fetch,
-		headers: { authorization: "Bearer test" },
-	});
-	expect(fetch).toHaveBeenCalledTimes(4);
-});
-
-it("stops polling when cancelled", async () => {
-	const { privateKey } = await keys();
-	const collector = new Collector(task, { configId: 7, privateKey });
-	const controller = new AbortController();
-	const fetch = vi.fn(async () => {
-		setTimeout(() => controller.abort(), 0);
-		return new Response(null, { status: 200, headers: { location } });
-	});
-	await expect(
-		collect(
-			collector,
-			{ start: 10, duration: 2 },
-			{ fetch, signal: controller.signal },
-		),
-	).rejects.toThrow();
-	expect(fetch).toHaveBeenCalledTimes(1);
-});
-
-it("returns pending state when Retry-After exceeds the auto-poll limit", async () => {
-	const { privateKey } = await keys();
-	const collector = new Collector(task, { configId: 7, privateKey });
-	const fetch = vi.fn(
-		async () =>
-			new Response(null, {
-				status: 200,
-				headers: { location, "retry-after": "300" },
-			}),
-	);
-	const result = await collect(
-		collector,
-		{ start: 10, duration: 2 },
-		{ fetch },
-	);
-	expect(result.status).toBe("pending");
-	expect(fetch).toHaveBeenCalledTimes(1);
 });

@@ -1,7 +1,7 @@
 # dap-ts
 
 TypeScript reporting client for the [Distributed Aggregation Protocol (DAP)](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.txt).
-Prepare encrypted measurements for two aggregators, with explicit key configuration and an optional Fetch adapter.
+Prepare encrypted measurements for two aggregators and process protocol responses without choosing an HTTP transport.
 
 ## Table of contents
 
@@ -16,8 +16,7 @@ Prepare encrypted measurements for two aggregators, with explicit key configurat
 Use the task configuration agreed with your leader and helper:
 
 ```typescript
-import { DAPClient, Task, prio3Count } from "dap-ts";
-import { execute, fetchHpkeConfigs } from "dap-ts/fetch";
+import { DAPClient, HpkeConfigList, Task, prio3Count } from "dap-ts";
 
 const task = Task.create({
   id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
@@ -30,10 +29,23 @@ const task = Task.create({
   vdaf: prio3Count(),
 });
 
-const hpke = await fetchHpkeConfigs(task);
+const hpke = {
+  leader: HpkeConfigList.parse(leaderHpkeConfigBytes),
+  helper: HpkeConfigList.parse(helperHpkeConfigBytes),
+};
 const client = new DAPClient(task, { hpke });
 const report = await client.prepareReport(1);
-const result = await execute(client.prepareUpload([report]));
+const upload = client.prepareUpload([report]);
+const response = await fetch(upload.request.url, {
+  method: upload.request.method,
+  headers: upload.request.headers,
+  body: upload.request.body,
+});
+const result = upload.process({
+  status: response.status,
+  headers: Object.fromEntries(response.headers),
+  body: new Uint8Array(await response.arrayBuffer()),
+});
 
 for (const rejection of result.rejected) {
   console.warn(rejection.id, rejection.code);
@@ -49,14 +61,14 @@ time-interval batches, targeting DAP draft 19 and
 - `Task.create()` configures a task; `Task.decode()` reads provisioned configuration bytes.
 - `prepareReport()` accepts `0` or `1` for count tasks. For sums, use `prio3Sum(maxMeasurement)` and report an integer from `0` through that bound. Sum measurements and bounds can be `bigint`.
 - `prepareUpload()` returns request metadata and a response processor for your own transport.
-- `execute()` sends a prepared upload once. Its options accept custom `fetch`, authentication `headers`, and an abort `signal`.
+- `PreparedUpload.request` contains the request to send; `process()` validates the response and reports each outcome.
 - `result.accepted` and `result.rejected` describe individual outcomes. Request-level protocol failures throw `DAPError`.
 
-HPKE retrieval is explicit. Supply cached lists through `HpkeConfigList.parse()`
+Supply provisioned or retrieved HPKE lists through `HpkeConfigList.parse()`
 or rotate keys with `client.withHpkeConfigs()`. Reuse prepared reports when
 retrying an uncertain network outcome.
 
-Binary codecs live in `dap-ts/messages`; Fetch helpers live in `dap-ts/fetch`.
+Binary codecs live in `dap-ts/messages`. [Sinbad](https://github.com/thibmeu/sinbad) provides Fetch helpers for HPKE retrieval, upload, and collection polling.
 
 For a bounded sum, set `vdaf: prio3Sum(1337)` when creating the task and call
 `client.prepareReport(42)`. Import `prio3Sum` from `dap-ts`. Both aggregators
@@ -70,27 +82,23 @@ collector HPKE configuration.
 
 ```typescript
 import { Collector } from "dap-ts/collector";
-import { collect } from "dap-ts/collector/fetch";
 
 const collector = new Collector(task, {
   configId: collectorConfigId,
   privateKey: collectorPrivateKey,
 });
-const progress = await collect(
-  collector,
-  { start: batchStart, duration: 1 }, // DAP time-precision units
-  { headers: { authorization: `Bearer ${collectorToken}` } },
-);
+const prepared = collector.prepare({ start: batchStart, duration: 1 });
+// Send prepared.request with your transport, then pass its status, headers,
+// and Uint8Array body to prepared.process(response).
+const progress = await prepared.process(collectionResponse);
 
 if (progress.status === "complete") console.log(progress.count); // bigint
 else saveForLater(progress.state);
 ```
 
-`collect()` polls up to 20 times by default and returns resumable state if the
-job is still pending or the server asks it to wait more than one minute. Pass
-that state to `collect()` later. The collector
-supports the DAP 19 Prio3Count and Prio3Sum profiles; the Janus DAP 18 upload test does not
-exercise collection.
+When a job is pending, persist `progress.state` and call `collector.resume(state)`
+to prepare the next request. The collector supports the DAP 19 Prio3Count and
+Prio3Sum profiles; the Janus DAP 18 upload test does not exercise collection.
 For sum tasks, completed progress has `sum` instead of `count`; both are `bigint`.
 
 ## Security considerations

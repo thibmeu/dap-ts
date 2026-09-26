@@ -1,6 +1,5 @@
 import { expect, it } from "vitest";
-import { execute, fetchHpkeConfigs } from "../src/fetch.js";
-import { DAPClient, prio3Count, Task } from "../src/index.js";
+import { DAPClient, HpkeConfigList, prio3Count, Task } from "../src/index.js";
 
 const enabled = process.env.JANUS_INTEROP === "1";
 const leader = "http://leader:8080/";
@@ -54,7 +53,15 @@ it.skipIf(!enabled)(
 			vdaf: prio3Count(),
 			testOnly: { dapVersion: 18, allowInsecureHttp: true },
 		});
-		const hpke = await fetchHpkeConfigs(task, { fetch: localFetch });
+		const getConfig = async (base: string) => {
+			const response = await localFetch(`${base}hpke_config`);
+			if (!response.ok) throw new Error(`HPKE config: HTTP ${response.status}`);
+			return HpkeConfigList.parse(new Uint8Array(await response.arrayBuffer()));
+		};
+		const hpke = {
+			leader: await getConfig(leader),
+			helper: await getConfig(helper),
+		};
 		const collectorConfig = hpke.leader.encode().slice(2).toBase64({
 			alphabet: "base64url",
 			omitPadding: true,
@@ -90,10 +97,17 @@ it.skipIf(!enabled)(
 		}
 
 		const client = new DAPClient(task, { hpke });
-		const result = await execute(
-			client.prepareUpload([await client.prepareReport(1)]),
-			{ fetch: localFetch },
-		);
+		const upload = client.prepareUpload([await client.prepareReport(1)]);
+		const response = await localFetch(upload.request.url, {
+			method: upload.request.method,
+			headers: upload.request.headers,
+			body: upload.request.body,
+		});
+		const result = upload.process({
+			status: response.status,
+			headers: Object.fromEntries(response.headers),
+			body: new Uint8Array(await response.arrayBuffer()),
+		});
 		expect(result.ok).toBe(true);
 	},
 	90_000,

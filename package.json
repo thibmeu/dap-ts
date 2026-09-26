@@ -15,17 +15,9 @@
       "types": "./dist/messages.d.ts",
       "default": "./dist/messages.js"
     },
-    "./fetch": {
-      "types": "./dist/fetch.d.ts",
-      "default": "./dist/fetch.js"
-    },
     "./collector": {
       "types": "./dist/collector.d.ts",
       "default": "./dist/collector.js"
-    },
-    "./collector/fetch": {
-      "types": "./dist/collector-fetch.d.ts",
-      "default": "./dist/collector-fetch.js"
     }
   },
   "files": [
@@ -33,6 +25,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
     "prepare": "npm run build",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",

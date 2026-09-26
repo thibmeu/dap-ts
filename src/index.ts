@@ -7,7 +7,7 @@ export type {
 	ReportRejection,
 	UploadResult,
 } from "./client.js";
-export { DAPClient } from "./client.js";
+export { checkMediaType, DAPClient } from "./client.js";
 export type { DAPErrorCode } from "./errors.js";
 export { DAPError, isDAPError } from "./errors.js";
 export type { AggregatorHpkeConfigs, RandomSource } from "./hpke.js";
