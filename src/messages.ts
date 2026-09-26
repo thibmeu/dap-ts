@@ -308,8 +308,7 @@ export function encodeReport(report: Report | PreparedReport): Uint8Array {
 	);
 }
 
-export function decodeReport(input: Uint8Array): Report {
-	const reader = new Reader(input);
+function readReport(reader: Reader): Report {
 	const metadata = {
 		id: reader.take(16),
 		time: reader.u64(),
@@ -327,8 +326,23 @@ export function decodeReport(input: Uint8Array): Report {
 		leader: readCiphertext(),
 		helper: readCiphertext(),
 	};
+	return result;
+}
+
+export function decodeReport(input: Uint8Array): Report {
+	const reader = new Reader(input);
+	const result = readReport(reader);
 	reader.end();
 	return result;
+}
+
+export function decodeUploadRequest(input: Uint8Array): Report[] {
+	const reader = new Reader(input);
+	const reports: Report[] = [];
+	while (reader.remaining) reports.push(readReport(reader));
+	if (!reports.length)
+		throw new DAPError("InvalidMessage", "Expected at least one report");
+	return reports;
 }
 
 export function encodeUploadRequest(

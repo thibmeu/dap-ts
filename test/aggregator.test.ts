@@ -3,8 +3,11 @@ import {
 	addCountOutputShare,
 	countVerifierMessage,
 	countVerifierShare,
+	helperCountBatchInit,
 	helperCountInit,
 	helperCountJobInit,
+	leaderCountBatchFinish,
+	leaderCountBatchInit,
 	leaderCountFinish,
 	leaderCountInit,
 	leaderCountJobFinish,
@@ -191,6 +194,90 @@ it("processes an encrypted DAP 19 report through a one-report aggregation job", 
 	expect(() =>
 		leaderCountJobFinish(leader.state, new Uint8Array(16), helper.response),
 	).toThrow();
+});
+
+it("keeps mixed Count job results in report order", async () => {
+	const client = new DAPClient(task, { hpke, random: deterministicRandom() });
+	const [first, second, third] = await Promise.all(
+		[1, 1, 0].map(async (value) =>
+			decodeReport(encodeReport(await client.prepareReport(value))),
+		),
+	);
+	const damaged = {
+		...second!,
+		helper: {
+			...second!.helper,
+			payload: second!.helper.payload.slice(),
+		},
+	};
+	damaged.helper.payload[0]! ^= 1;
+	const unsupported = {
+		...third!,
+		metadata: {
+			...third!.metadata,
+			publicExtensions: [{ type: 500, data: new Uint8Array() }],
+		},
+	};
+	const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
+	const helperKey = { configId: 8, privateKey: bytes(hpkeVector.skRm) };
+	const verifyKey = bytes(count0.verify_key);
+	const leader = await leaderCountBatchInit(
+		task,
+		[first!, damaged, unsupported],
+		leaderKey,
+		0,
+		verifyKey,
+	);
+	expect(leader.reports.map((report) => report.reportId)).toEqual([
+		first!.metadata.id,
+		second!.metadata.id,
+	]);
+	expect(leader.rejected).toMatchObject([
+		{ reportId: third!.metadata.id, error: { code: "InvalidReport" } },
+	]);
+	const helper = await helperCountBatchInit(
+		task,
+		leader.request,
+		helperKey,
+		0,
+		verifyKey,
+	);
+	expect(helper.reports).toHaveLength(2);
+	expect(helper.reports[0]?.outputShare).toBeDefined();
+	expect(helper.reports[1]?.response).toEqual(
+		Uint8Array.of(...second!.metadata.id, 2, 5),
+	);
+	const finished = leaderCountBatchFinish(leader.reports, helper.response);
+	expect(finished[0]).toHaveProperty("outputShare");
+	expect(finished[1]).toMatchObject({ reportError: 5 });
+	expect(() =>
+		leaderCountBatchFinish(
+			leader.reports,
+			concat(helper.reports[1]!.response, helper.reports[0]!.response),
+		),
+	).toThrow();
+	expect(() =>
+		leaderCountBatchFinish(leader.reports, helper.reports[0]!.response),
+	).toThrow();
+	await expect(
+		leaderCountBatchInit(task, [first!, first!], leaderKey, 0, verifyKey),
+	).rejects.toThrow();
+	const single = await leaderCountJobInit(
+		task,
+		first!,
+		leaderKey,
+		0,
+		verifyKey,
+	);
+	await expect(
+		helperCountBatchInit(
+			task,
+			concat(single.request, single.request.subarray(7)),
+			helperKey,
+			0,
+			verifyKey,
+		),
+	).rejects.toThrow();
 });
 
 it("adds canonical Count output shares", () => {

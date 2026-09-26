@@ -111,33 +111,33 @@ exercise collection. For sum tasks, completed progress has `sum` instead of
 
 ## Aggregator primitive
 
-`dap-ts/aggregator` currently supports one DAP 19 Prio3Count report per
-aggregation job. Each server uses its own HPKE private key and the shared VDAF
+`dap-ts/aggregator` supports DAP 19 Prio3Count jobs with one or more reports.
+Each server uses its own HPKE private key and the shared VDAF
 verification key. The caller handles authentication, HTTP, storage, and retries.
 
 ```typescript
 import {
-  leaderCountJobInit, helperCountJobInit, leaderCountJobFinish,
+  leaderCountBatchInit, helperCountBatchInit, leaderCountBatchFinish,
   prepareAggregatorKey,
 } from "dap-ts/aggregator";
 
 const leaderKey = await prepareAggregatorKey(leaderHpkeKey);
 const helperKey = await prepareAggregatorKey(helperHpkeKey);
-const leader = await leaderCountJobInit(task, report, leaderKey, 0, verifyKey);
-const helper = await helperCountJobInit(task, leader.request, helperKey, 0, verifyKey);
-const result = leaderCountJobFinish(leader.state, leader.reportId, helper.response);
+const leader = await leaderCountBatchInit(task, reports, leaderKey, 0, verifyKey);
+const helper = await helperCountBatchInit(task, leader.request, helperKey, 0, verifyKey);
+const results = leaderCountBatchFinish(leader.reports, helper.response);
 ```
 
 `leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
 `privateKey`. Prepare each key once when starting a server. Raw keys still work
 for occasional calls. Before sending `leader.request`, store it with
-`leader.state`. Before sending `helper.response`, atomically check replay and
-collection state, add `helper.outputShare` if present, and cache the exact
+`leader.reports`. Before sending `helper.response`, atomically check replay and
+collection state, add each accepted `helper.reports[].outputShare`, and cache the exact
 response. The Leader then validates the response and commits its share once.
 Return cached bytes on retry; reject a reused job ID with different bytes.
 Keep a bucket with a pending Leader job out of collection. The host can encode
 replay or collected-bucket errors with `encodeCountJobRejection()`.
-This first slice has no multi-report jobs or Sum/Histogram verification.
+The one-report functions remain available. Sum and Histogram verification are pending.
 
 `npm run bench:aggregator` measures the local one-report Count path on Node,
 with raw and prepared keys. It excludes HTTP and storage. Compare deployments

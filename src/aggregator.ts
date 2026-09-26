@@ -1,4 +1,13 @@
-import { bytes, concat, decodeId, Reader, uint, vector } from "./binary.js";
+import {
+	base64url,
+	bytes,
+	concat,
+	concatParts,
+	decodeId,
+	Reader,
+	uint,
+	vector,
+} from "./binary.js";
 import { DAPError } from "./errors.js";
 import { createSuite } from "./hpke.js";
 import {
@@ -275,6 +284,14 @@ function context(task: Task<number>): Uint8Array {
 	return concat(new TextEncoder().encode("dap-19"), decodeId(task.id, 32));
 }
 
+function countJobHeader(verificationKeyId: number): Uint8Array {
+	return concat(
+		uint(verificationKeyId, 1),
+		vector(new Uint8Array(), 4),
+		vector(new Uint8Array(), 2),
+	);
+}
+
 /** Build one DAP 19 aggregation initialization request; persist the returned bytes for retries. */
 export async function leaderCountJobInit(
 	task: Task<number>,
@@ -307,9 +324,7 @@ export async function leaderCountJobInit(
 	);
 	const helper = report.helper;
 	const request = concat(
-		uint(verificationKeyId, 1),
-		vector(new Uint8Array(), 4),
-		vector(new Uint8Array(), 2),
+		countJobHeader(verificationKeyId),
 		encodeReportMetadata(report.metadata),
 		vector(report.publicShare, 4),
 		uint(helper.configId, 1),
@@ -325,7 +340,178 @@ export async function leaderCountJobInit(
 	};
 }
 
-/** Process one request. Commit and cache the returned response atomically in the host before sending it. */
+/** Build one job from distinct Count reports, keeping per-report validation failures. */
+export async function leaderCountBatchInit(
+	task: Task<number>,
+	reports: readonly Report[],
+	key: AggregatorKey,
+	verificationKeyId: number,
+	verifyKey: Uint8Array,
+	nowMs = Date.now(),
+): Promise<{
+	request: Uint8Array;
+	reports: { reportId: Uint8Array; time: bigint; state: Uint8Array }[];
+	rejected: { reportId: Uint8Array; error: DAPError }[];
+}> {
+	if (!reports.length)
+		throw new DAPError("InvalidMessage", "Expected at least one report");
+	const seen = new Set<string>();
+	const ready = [];
+	const rejected = [];
+	const header = countJobHeader(verificationKeyId);
+	const requestParts = [header];
+	for (const report of reports) {
+		const reportId = bytes(report.metadata.id, 16);
+		const id = base64url(reportId);
+		if (seen.has(id))
+			throw new DAPError("InvalidMessage", "Duplicate report ID in job");
+		seen.add(id);
+		try {
+			const job = await leaderCountJobInit(
+				task,
+				report,
+				key,
+				verificationKeyId,
+				verifyKey,
+				nowMs,
+			);
+			ready.push({ reportId: job.reportId, time: job.time, state: job.state });
+			requestParts.push(job.request.subarray(header.length));
+		} catch (error) {
+			if (
+				!(error instanceof DAPError) ||
+				![
+					"InvalidHpkeConfig",
+					"DecryptionFailed",
+					"InvalidReport",
+					"ReportTooEarly",
+					"ReportDropped",
+				].includes(error.code)
+			)
+				throw error;
+			rejected.push({ reportId: reportId.slice(), error });
+		}
+	}
+	return { request: concatParts(requestParts), reports: ready, rejected };
+}
+
+/** Verify each Count report in a job. The host commits and caches the response atomically. */
+export async function helperCountBatchInit(
+	task: Task<number>,
+	request: Uint8Array,
+	key: AggregatorKey,
+	verificationKeyId: number,
+	verifyKey: Uint8Array,
+	nowMs = Date.now(),
+): Promise<{
+	response: Uint8Array;
+	reports: {
+		response: Uint8Array;
+		reportId: Uint8Array;
+		time: bigint;
+		outputShare?: Uint8Array;
+	}[];
+}> {
+	const reader = new Reader(request);
+	const selectedKey = reader.uint(1);
+	if (reader.vector(4).length || reader.vector(2).length)
+		throw new DAPError(
+			"InvalidMessage",
+			"Expected empty Count parameter and job extensions",
+		);
+	const entries = [];
+	const seen = new Set<string>();
+	while (reader.remaining) {
+		const metadata = {
+			id: reader.take(16),
+			time: reader.u64(),
+			publicExtensions: [],
+		};
+		const id = base64url(metadata.id);
+		if (seen.has(id))
+			throw new DAPError("InvalidMessage", "Duplicate report ID in job");
+		seen.add(id);
+		entries.push({
+			metadata,
+			unsupportedPublicExtension: reader.vector(2).length > 0,
+			publicShare: reader.vector(4),
+			ciphertext: {
+				configId: reader.uint(1),
+				enc: reader.vector(2, 1),
+				payload: reader.vector(4, 1),
+			},
+			inbound: reader.vector(4, 1),
+		});
+	}
+	if (!entries.length)
+		throw new DAPError("InvalidMessage", "Empty aggregation job");
+	const results = [];
+	for (const entry of entries) {
+		const { metadata, publicShare, ciphertext, inbound } = entry;
+		const reject = (code: number) => ({
+			response: encodeCountJobRejection(metadata.id, code),
+			reportId: metadata.id,
+			time: metadata.time,
+		});
+		if (selectedKey !== verificationKeyId) {
+			results.push(reject(9));
+			continue;
+		}
+		if (entry.unsupportedPublicExtension) {
+			results.push(reject(7));
+			continue;
+		}
+		let input: Uint8Array;
+		try {
+			input = await openCountInputShare(
+				task,
+				"helper",
+				metadata,
+				publicShare,
+				ciphertext,
+				key,
+				nowMs,
+			);
+		} catch (cause) {
+			const code =
+				cause instanceof DAPError && cause.code === "InvalidHpkeConfig"
+					? 4
+					: cause instanceof DAPError && cause.code === "DecryptionFailed"
+						? 5
+						: cause instanceof DAPError && cause.code === "ReportTooEarly"
+							? 8
+							: cause instanceof DAPError && cause.code === "ReportDropped"
+								? 3
+								: 7;
+			results.push(reject(code));
+			continue;
+		}
+		try {
+			const { outputShare, outbound } = helperCountInit(
+				verifyKey,
+				context(task),
+				metadata.id,
+				publicShare,
+				input,
+				inbound,
+			);
+			results.push({
+				response: concat(metadata.id, Uint8Array.of(0), vector(outbound, 4, 1)),
+				reportId: metadata.id,
+				time: metadata.time,
+				outputShare,
+			});
+		} catch {
+			results.push(reject(6));
+		}
+	}
+	return {
+		response: concatParts(results.map((result) => result.response)),
+		reports: results,
+	};
+}
+
+/** Process a one-report job. */
 export async function helperCountJobInit(
 	task: Task<number>,
 	request: Uint8Array,
@@ -339,74 +525,17 @@ export async function helperCountJobInit(
 	time: bigint;
 	outputShare?: Uint8Array;
 }> {
-	const reader = new Reader(request);
-	const selectedKey = reader.uint(1);
-	if (reader.vector(4).length || reader.vector(2).length)
-		throw new DAPError(
-			"InvalidMessage",
-			"Expected empty Count parameter and job extensions",
-		);
-	const metadata = {
-		id: reader.take(16),
-		time: reader.u64(),
-		publicExtensions: [],
-	};
-	const unsupportedPublicExtension = reader.vector(2).length > 0;
-	const publicShare = reader.vector(4);
-	const ciphertext = {
-		configId: reader.uint(1),
-		enc: reader.vector(2, 1),
-		payload: reader.vector(4, 1),
-	};
-	const inbound = reader.vector(4, 1);
-	reader.end();
-	const reject = (code: number) => ({
-		response: encodeCountJobRejection(metadata.id, code),
-		reportId: metadata.id,
-		time: metadata.time,
-	});
-	if (selectedKey !== verificationKeyId) return reject(9);
-	if (unsupportedPublicExtension) return reject(7);
-	let input: Uint8Array;
-	try {
-		input = await openCountInputShare(
-			task,
-			"helper",
-			metadata,
-			publicShare,
-			ciphertext,
-			key,
-			nowMs,
-		);
-	} catch (cause) {
-		if (cause instanceof DAPError && cause.code === "InvalidHpkeConfig")
-			return reject(4);
-		if (cause instanceof DAPError && cause.code === "DecryptionFailed")
-			return reject(5);
-		if (cause instanceof DAPError && cause.code === "ReportTooEarly")
-			return reject(8);
-		if (cause instanceof DAPError && cause.code === "ReportDropped")
-			return reject(3);
-		return reject(7);
-	}
-	try {
-		const { outputShare, outbound } = helperCountInit(
-			verifyKey,
-			context(task),
-			metadata.id,
-			publicShare,
-			input,
-			inbound,
-		);
-		return {
-			response: concat(metadata.id, Uint8Array.of(0), vector(outbound, 4, 1)),
-			reportId: metadata.id,
-			time: metadata.time,
-			outputShare,
-		};
-	} catch {
-		return reject(6);
-	}
+	const job = await helperCountBatchInit(
+		task,
+		request,
+		key,
+		verificationKeyId,
+		verifyKey,
+		nowMs,
+	);
+	if (job.reports.length !== 1)
+		throw new DAPError("InvalidMessage", "Expected one report");
+	return job.reports[0]!;
 }
 
 /** Parse the Helper's response and finish the Leader's Count verification. */
@@ -432,6 +561,40 @@ export function leaderCountJobFinish(
 	const inbound = reader.vector(4, 1);
 	reader.end();
 	return { outputShare: leaderCountFinish(state, inbound) };
+}
+
+/** Finish every report in response order, rejecting missing, extra, or reordered IDs. */
+export function leaderCountBatchFinish(
+	reports: readonly {
+		readonly reportId: Uint8Array;
+		readonly time: bigint;
+		readonly state: Uint8Array;
+	}[],
+	response: Uint8Array,
+): ({ reportId: Uint8Array; time: bigint } & (
+	| { outputShare: Uint8Array }
+	| { reportError: number }
+))[] {
+	if (!reports.length)
+		throw new DAPError("InvalidMessage", "Expected at least one report");
+	const reader = new Reader(response);
+	const results = [];
+	for (const report of reports) {
+		const id = reader.take(16);
+		const type = reader.uint(1);
+		let record: Uint8Array;
+		if (type === 2) record = concat(id, uint(type, 1), uint(reader.uint(1), 1));
+		else if (type === 0)
+			record = concat(id, uint(type, 1), vector(reader.vector(4, 1), 4, 1));
+		else throw new DAPError("InvalidMessage", "Unexpected response type");
+		results.push({
+			reportId: report.reportId,
+			time: report.time,
+			...leaderCountJobFinish(report.state, report.reportId, record),
+		});
+	}
+	reader.end();
+	return results;
 }
 
 /** Add a verified Count output share to a stored aggregate share. */

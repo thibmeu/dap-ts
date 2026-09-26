@@ -5,6 +5,7 @@ import {
 	decodeReport,
 	decodeTaskConfiguration,
 	decodeUploadErrors,
+	decodeUploadRequest,
 	encodeExtensions,
 	encodeHpkeConfigList,
 	encodeReport,
@@ -177,6 +178,11 @@ it("matches a hand-derived report and concatenates reports without a bulk prefix
 	expect(encodeUploadRequest([report, encoded])).toEqual(
 		new Uint8Array([...encoded, ...encoded]),
 	);
+	expect(decodeUploadRequest(encodeUploadRequest([report, report]))).toEqual([
+		report,
+		report,
+	]);
+	expect(() => decodeUploadRequest(new Uint8Array())).toThrow();
 	for (let i = 0; i < encoded.length; i++)
 		expect(() => decodeReport(encoded.slice(0, i))).toThrow();
 	expect(() => decodeReport(new Uint8Array([...encoded, 0]))).toThrow();
