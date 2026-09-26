@@ -26,6 +26,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:janus": "test/janus.sh",

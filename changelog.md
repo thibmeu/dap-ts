@@ -12,6 +12,7 @@ Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.c
 - Transport-neutral upload operations, an optional Fetch adapter, and binary message codecs.
 - Specification-vector tests for Prio3Count, TurboSHAKE, and HPKE.
 - README with a count-reporting example and usage guidance.
+- Source installs and package creation build the distributable JavaScript and declarations.
 
 ### Fixed
 
