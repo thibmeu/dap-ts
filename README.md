@@ -58,6 +58,9 @@ for (const rejection of result.rejected) {
 The package uses ESM and Web APIs. It supports Prio3Count, Prio3Sum, and Prio3Histogram with
 time-interval batches, targeting DAP draft 19 and
 [VDAF draft 20](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-20.txt).
+Reporting has been smoke-tested on Node 26 and from the packed package in
+headless Chrome, including a Dedicated Worker. Cloudflare Workers and a wider
+browser matrix have not been tested.
 
 - `Task.create()` configures a task; `Task.decode()` reads provisioned configuration bytes.
 - `prepareReport()` accepts `0` or `1` for count tasks. For sums, use `prio3Sum(maxMeasurement)` and report an integer from `0` through that bound. Sum measurements and bounds can be `bigint`. For histograms, use `prio3Histogram(length, chunkLength)` and report a bucket index from `0` through `length - 1`.
@@ -151,6 +154,8 @@ using the same task, report count, hardware, concurrency, and persistence mode.
 ## Security considerations
 
 This library has not been audited.
+DAP requires independent aggregators and suitable batch policies. It does not
+provide differential privacy or prevent disclosure from very small batches.
 
 ## License
 
