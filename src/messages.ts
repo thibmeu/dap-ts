@@ -58,6 +58,81 @@ export interface Report {
 	readonly helper: HpkeCiphertext;
 }
 
+export interface CollectionJobResponse {
+	readonly reportCount: bigint;
+	readonly start: bigint;
+	readonly duration: bigint;
+	readonly leader: HpkeCiphertext;
+	readonly helper: HpkeCiphertext;
+}
+
+/** Prio3Count has an empty aggregation parameter and no collection extensions. */
+export function encodeCollectionJobRequest(
+	start: number | bigint,
+	duration: number | bigint,
+): Uint8Array {
+	const encodedStart = uint(start, 8);
+	const encodedDuration = uint(duration, 8);
+	if (
+		BigInt(duration) === 0n ||
+		BigInt(start) + BigInt(duration) > 0xffffffffffffffffn
+	)
+		throw new DAPError("InvalidMessage", "Invalid collection interval");
+	return concat(
+		uint(1, 1),
+		vector(concat(encodedStart, encodedDuration), 2),
+		vector(new Uint8Array(), 4),
+		vector(new Uint8Array(), 2),
+	);
+}
+
+export function decodeCollectionJobRequest(input: Uint8Array): {
+	start: bigint;
+	duration: bigint;
+} {
+	const reader = new Reader(input);
+	if (reader.uint(1) !== 1)
+		throw new DAPError("InvalidMessage", "Expected time-interval query");
+	const query = new Reader(reader.vector(2));
+	const start = query.u64();
+	const duration = query.u64();
+	query.end();
+	if (reader.vector(4).length || reader.vector(2).length)
+		throw new DAPError(
+			"InvalidMessage",
+			"Expected empty count parameter and extensions",
+		);
+	reader.end();
+	if (duration === 0n || start + duration > 0xffffffffffffffffn)
+		throw new DAPError("InvalidMessage", "Invalid collection interval");
+	return { start, duration };
+}
+
+export function decodeCollectionJobResponse(
+	input: Uint8Array,
+): CollectionJobResponse {
+	const reader = new Reader(input);
+	const reportCount = reader.u64();
+	const start = reader.u64();
+	const duration = reader.u64();
+	const ciphertext = (): HpkeCiphertext => ({
+		configId: reader.uint(1),
+		enc: reader.vector(2, 1),
+		payload: reader.vector(4, 1),
+	});
+	const result = {
+		reportCount,
+		start,
+		duration,
+		leader: ciphertext(),
+		helper: ciphertext(),
+	};
+	reader.end();
+	if (duration === 0n || start + duration > 0xffffffffffffffffn)
+		throw new DAPError("InvalidMessage", "Invalid collection interval");
+	return result;
+}
+
 export function encodeExtensions(
 	extensions: readonly Extension[],
 	sorted = false,

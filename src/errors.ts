@@ -6,6 +6,7 @@ export type DAPErrorCode =
 	| "UnsupportedCipherSuite"
 	| "InvalidHpkeConfig"
 	| "EncryptionFailed"
+	| "DecryptionFailed"
 	| "InvalidReport"
 	| "InvalidResponse"
 	| "HttpError";

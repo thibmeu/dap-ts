@@ -13,6 +13,7 @@ Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.c
 - Specification-vector tests for Prio3Count, TurboSHAKE, and HPKE.
 - README with a count-reporting example and usage guidance.
 - Source installs and package creation build the distributable JavaScript and declarations.
+- Separate count collector import with authenticated collection requests, resumable polling, HPKE decryption, and exact integer results.
 
 ### Fixed
 

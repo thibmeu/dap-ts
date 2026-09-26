@@ -7,6 +7,7 @@ Prepare encrypted measurements for two aggregators, with explicit key configurat
 
 - [Example](#example)
 - [Usage](#usage)
+- [Collection](#collection)
 - [Security considerations](#security-considerations)
 - [License](#license)
 
@@ -56,6 +57,36 @@ or rotate keys with `client.withHpkeConfigs()`. Reuse prepared reports when
 retrying an uncertain network outcome.
 
 Binary codecs live in `dap-ts/messages`; Fetch helpers live in `dap-ts/fetch`.
+
+## Collection
+
+Count collection is a separate backend import. The collector HPKE key and HTTP
+credentials must stay on the backend. Both aggregators must have the matching
+collector HPKE configuration.
+
+```typescript
+import { Collector } from "dap-ts/collector";
+import { collect } from "dap-ts/collector/fetch";
+
+const collector = new Collector(task, {
+  configId: collectorConfigId,
+  privateKey: collectorPrivateKey,
+});
+const progress = await collect(
+  collector,
+  { start: batchStart, duration: 1 }, // DAP time-precision units
+  { headers: { authorization: `Bearer ${collectorToken}` } },
+);
+
+if (progress.status === "complete") console.log(progress.count); // bigint
+else saveForLater(progress.state);
+```
+
+`collect()` polls up to 20 times by default and returns resumable state if the
+job is still pending or the server asks it to wait more than one minute. Pass
+that state to `collect()` later. The collector
+supports the DAP 19 Prio3Count profile; the Janus DAP 18 upload test does not
+exercise collection.
 
 ## Security considerations
 

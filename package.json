@@ -18,6 +18,14 @@
     "./fetch": {
       "types": "./dist/fetch.d.ts",
       "default": "./dist/fetch.js"
+    },
+    "./collector": {
+      "types": "./dist/collector.d.ts",
+      "default": "./dist/collector.js"
+    },
+    "./collector/fetch": {
+      "types": "./dist/collector-fetch.d.ts",
+      "default": "./dist/collector-fetch.js"
     }
   },
   "files": [
