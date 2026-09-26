@@ -117,22 +117,27 @@ verification key. The caller handles authentication, HTTP, storage, and retries.
 
 ```typescript
 import {
-  leaderCountJobInit, helperCountJobInit, leaderCountJobFinish,
+  leaderCountJobInit, helperCountJobInit,
   prepareAggregatorKey,
 } from "dap-ts/aggregator";
 
 const leaderKey = await prepareAggregatorKey(leaderHpkeKey);
 const helperKey = await prepareAggregatorKey(helperHpkeKey);
-const leader = await leaderCountJobInit(task, report, leaderKey, 0, verifyKey);
-// Persist leader.request, leader.state, leader.reportId, and leader.time.
-const helper = await helperCountJobInit(task, leader.request, helperKey, 0, verifyKey);
-// If helper.outputShare exists, atomically claim the report and add the share
-// to its time bucket. Save helper.response before sending it to the leader.
-const result = leaderCountJobFinish(leader.state, leader.reportId, helper.response);
-if ("outputShare" in result) {
-  // Atomically claim the report and add result.outputShare to the leader bucket.
-}
+const leader = await leaderStore.loadLeader(jobId) ?? await leaderStore.saveLeader(
+  jobId, await leaderCountJobInit(task, report, leaderKey, 0, verifyKey),
+);
+const response = await helperStore.loadHelper(jobId, leader.request)
+  ?? await helperStore.commitHelper(
+    jobId, leader.request,
+    await helperCountJobInit(task, leader.request, helperKey, 0, verifyKey),
+  );
+await leaderStore.commitLeader(jobId, response);
 ```
+
+`CountLeaderStore` and `CountHelperStore` are TypeScript interfaces for the
+application's storage adapter. Each instance is scoped to one task and one
+role. The methods can use a SQL database, a single-writer service, or an
+in-memory store in tests; dap-ts provides no database implementation.
 
 `leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
 `privateKey`. Prepare each key once when starting a server. Raw keys still work

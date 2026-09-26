@@ -408,3 +408,39 @@ export function leaderCountJobFinish(
 	reader.end();
 	return { outputShare: leaderCountFinish(state, inbound) };
 }
+
+export type CountLeaderJob = Awaited<ReturnType<typeof leaderCountJobInit>>;
+export type CountHelperJob = Awaited<ReturnType<typeof helperCountJobInit>>;
+
+/** Task-scoped Leader storage. Writes are atomic; reads return owned snapshots. */
+export interface CountLeaderStore {
+	/** Resume a pending job without decrypting the report again. */
+	loadLeader(
+		jobId: string,
+	): CountLeaderJob | undefined | Promise<CountLeaderJob | undefined>;
+	/** Persist the exact request and state before sending. Identical retries return saved bytes. */
+	saveLeader(
+		jobId: string,
+		job: CountLeaderJob,
+	): CountLeaderJob | Promise<CountLeaderJob>;
+	/** Validate the saved state, claim the report, add its share, and release the bucket reservation. */
+	commitLeader(
+		jobId: string,
+		response: Uint8Array,
+	): Uint8Array | undefined | Promise<Uint8Array | undefined>;
+}
+
+/** Task-scoped Helper storage. A success response is safe to send only after commit. */
+export interface CountHelperStore {
+	/** Return a committed response for identical request bytes; fail on a job ID conflict. */
+	loadHelper(
+		jobId: string,
+		request: Uint8Array,
+	): Uint8Array | undefined | Promise<Uint8Array | undefined>;
+	/** Atomically check job bytes, replay and collection state, add one share, and cache the response. */
+	commitHelper(
+		jobId: string,
+		request: Uint8Array,
+		result: CountHelperJob,
+	): Uint8Array | Promise<Uint8Array>;
+}

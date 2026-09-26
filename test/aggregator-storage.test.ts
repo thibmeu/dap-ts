@@ -1,5 +1,9 @@
 import { expect, it } from "vitest";
 import {
+	type CountHelperJob,
+	type CountHelperStore,
+	type CountLeaderJob,
+	type CountLeaderStore,
 	encodeCountJobRejection,
 	helperCountJobInit,
 	leaderCountJobFinish,
@@ -12,15 +16,12 @@ import { P, unshardCount } from "../src/prio3-count.js";
 import { deterministicRandom, hpke, task } from "./fixtures.js";
 import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 
-type Leader = Awaited<ReturnType<typeof leaderCountJobInit>>;
-type Helper = Awaited<ReturnType<typeof helperCountJobInit>>;
-
 // One synchronous method stands in for each database transaction. A real store
 // needs unique report/job indexes and a transaction around these same checks.
-class MemoryStore {
+class MemoryStore implements CountLeaderStore, CountHelperStore {
 	jobs = new Map<
 		string,
-		{ request: Uint8Array; response?: Uint8Array; leader?: Leader }
+		{ request: Uint8Array; response?: Uint8Array; leader?: CountLeaderJob }
 	>();
 	reports = new Set<string>();
 	buckets = new Map<
@@ -38,12 +39,31 @@ class MemoryStore {
 		return value;
 	}
 
-	saveLeader(jobId: string, job: Leader): Leader {
+	loadLeader(jobId: string): CountLeaderJob | undefined {
+		const job = this.jobs.get(jobId)?.leader;
+		return (
+			job && {
+				request: job.request.slice(),
+				state: job.state.slice(),
+				reportId: job.reportId.slice(),
+				time: job.time,
+			}
+		);
+	}
+
+	loadHelper(jobId: string, request: Uint8Array): Uint8Array | undefined {
+		const job = this.jobs.get(jobId);
+		if (!job) return undefined;
+		if (!same(job.request, request)) throw new Error("job identity conflict");
+		return job.response?.slice();
+	}
+
+	saveLeader(jobId: string, job: CountLeaderJob): CountLeaderJob {
 		const prior = this.jobs.get(jobId);
 		if (prior) {
 			if (!prior.leader || !same(prior.request, job.request))
 				throw new Error("job identity conflict");
-			return prior.leader;
+			return this.loadLeader(jobId)!;
 		}
 		const reportId = job.reportId.toHex();
 		const bucket = this.bucket(job.time);
@@ -60,12 +80,14 @@ class MemoryStore {
 		return saved;
 	}
 
-	commitHelper(jobId: string, request: Uint8Array, result: Helper): Uint8Array {
+	commitHelper(
+		jobId: string,
+		request: Uint8Array,
+		result: CountHelperJob,
+	): Uint8Array {
 		const prior = this.jobs.get(jobId);
 		if (prior) {
-			if (!same(prior.request, request))
-				throw new Error("job identity conflict");
-			return prior.response!.slice();
+			return this.loadHelper(jobId, request)!;
 		}
 		const bucket = this.bucket(result.time);
 		const reportId = result.reportId.toHex();
@@ -175,10 +197,11 @@ it("resumes interrupted jobs and commits each share once", async () => {
 		helperResult,
 	);
 	// The response was lost after Helper committed. Both roles restart from saved bytes.
-	expect(
-		helperStore.commitHelper("job-1", leader.request, helperResult),
-	).toEqual(helperResponse);
+	expect(helperStore.loadHelper("job-1", leader.request)).toEqual(
+		helperResponse,
+	);
 	expect(helperStore.bucket(leader.time).count).toBe(1);
+	expect(leaderStore.loadLeader("job-1")).toEqual(leader);
 	expect(leaderStore.saveLeader("job-1", leader)).toEqual(leader);
 	const leaderShare = leaderStore.commitLeader("job-1", helperResponse);
 	expect(leaderStore.commitLeader("job-1", helperResponse)).toBeUndefined();
