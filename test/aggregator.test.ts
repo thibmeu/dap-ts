@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import {
+	addCountOutputShare,
 	countVerifierMessage,
 	countVerifierShare,
 	helperCountInit,
@@ -10,10 +11,13 @@ import {
 	leaderCountJobInit,
 	openCountInputShare,
 } from "../src/aggregator.js";
+import { concat, uint } from "../src/binary.js";
 import { DAPClient } from "../src/client.js";
+import type { DAPError } from "../src/errors.js";
 import { decodeReport, encodeReport } from "../src/messages.js";
 import { unshardCount } from "../src/prio3-count.js";
-import { deterministicRandom, hpke, task } from "./fixtures.js";
+import { Task } from "../src/task.js";
+import { deterministicRandom, hpke, task, taskOptions } from "./fixtures.js";
 import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 import count0 from "./vectors/Prio3Count_0.json";
 import count2 from "./vectors/Prio3Count_2.json";
@@ -187,4 +191,70 @@ it("processes an encrypted DAP 19 report through a one-report aggregation job", 
 	expect(() =>
 		leaderCountJobFinish(leader.state, new Uint8Array(16), helper.response),
 	).toThrow();
+});
+
+it("adds canonical Count output shares", () => {
+	const one = Uint8Array.of(1, 0, 0, 0, 0, 0, 0, 0);
+	expect(addCountOutputShare(one, one)).toEqual(
+		Uint8Array.of(2, 0, 0, 0, 0, 0, 0, 0),
+	);
+	expect(() => addCountOutputShare(one, new Uint8Array(7))).toThrow();
+});
+
+it("rejects future and out-of-task-interval Count reports before decryption", async () => {
+	const client = new DAPClient(task, {
+		hpke,
+		random: deterministicRandom(),
+		clock: () => 179999,
+	});
+	const report = decodeReport(encodeReport(await client.prepareReport(1)));
+	const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
+	const future = { ...report.metadata, time: 20n };
+	await expect(
+		openCountInputShare(
+			task,
+			"leader",
+			future,
+			report.publicShare,
+			report.leader,
+			leaderKey,
+			179999,
+		),
+	).rejects.toMatchObject({
+		code: "ReportTooEarly",
+	} satisfies Partial<DAPError>);
+	const bounded = Task.create({
+		...taskOptions,
+		extensions: [{ type: 1, data: concat(uint(3, 8), uint(2, 8)) }],
+	});
+	await expect(
+		openCountInputShare(
+			bounded,
+			"leader",
+			report.metadata,
+			report.publicShare,
+			report.leader,
+			leaderKey,
+			179999,
+		),
+	).rejects.toMatchObject({
+		code: "ReportDropped",
+	} satisfies Partial<DAPError>);
+	const invalidExtension = {
+		...report.metadata,
+		publicExtensions: [{ type: 500, data: new Uint8Array() }],
+	};
+	await expect(
+		openCountInputShare(
+			task,
+			"leader",
+			invalidExtension,
+			report.publicShare,
+			report.leader,
+			leaderKey,
+			179999,
+		),
+	).rejects.toMatchObject({
+		code: "InvalidReport",
+	} satisfies Partial<DAPError>);
 });

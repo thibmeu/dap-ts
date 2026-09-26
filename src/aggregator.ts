@@ -194,6 +194,7 @@ export async function openCountInputShare(
 	publicShare: Uint8Array,
 	ciphertext: HpkeCiphertext,
 	key: AggregatorKey,
+	nowMs = Date.now(),
 ): Promise<Uint8Array> {
 	if (
 		!(task instanceof Task) ||
@@ -211,7 +212,23 @@ export async function openCountInputShare(
 		throw new DAPError("InvalidReport", "Unsupported report extension");
 	if (metadata.time > BigInt(Number.MAX_SAFE_INTEGER))
 		throw new DAPError("InvalidReport", "Invalid report time");
-	task.validateTime(Number(metadata.time));
+	if (!Number.isSafeInteger(nowMs) || nowMs < 0)
+		throw new DAPError("InvalidMessage", "Invalid current time");
+	if (
+		metadata.time * BigInt(task.timePrecision) >
+		BigInt(Math.floor(nowMs / 1000)) + 300n
+	)
+		throw new DAPError(
+			"ReportTooEarly",
+			"Report time is too far in the future",
+		);
+	try {
+		task.validateTime(Number(metadata.time));
+	} catch (cause) {
+		throw new DAPError("ReportDropped", "Report is outside the task interval", {
+			cause,
+		});
+	}
 	const taskId = decodeId(task.id, 32);
 	const aad = encodeInputShareAad(
 		taskId,
@@ -265,6 +282,7 @@ export async function leaderCountJobInit(
 	key: AggregatorKey,
 	verificationKeyId: number,
 	verifyKey: Uint8Array,
+	nowMs = Date.now(),
 ): Promise<{
 	request: Uint8Array;
 	state: Uint8Array;
@@ -278,6 +296,7 @@ export async function leaderCountJobInit(
 		report.publicShare,
 		report.leader,
 		key,
+		nowMs,
 	);
 	const { state, outbound } = leaderCountInit(
 		verifyKey,
@@ -313,6 +332,7 @@ export async function helperCountJobInit(
 	key: AggregatorKey,
 	verificationKeyId: number,
 	verifyKey: Uint8Array,
+	nowMs = Date.now(),
 ): Promise<{
 	response: Uint8Array;
 	reportId: Uint8Array;
@@ -331,8 +351,7 @@ export async function helperCountJobInit(
 		time: reader.u64(),
 		publicExtensions: [],
 	};
-	if (reader.vector(2).length)
-		throw new DAPError("InvalidMessage", "Unsupported report extension");
+	const unsupportedPublicExtension = reader.vector(2).length > 0;
 	const publicShare = reader.vector(4);
 	const ciphertext = {
 		configId: reader.uint(1),
@@ -347,6 +366,7 @@ export async function helperCountJobInit(
 		time: metadata.time,
 	});
 	if (selectedKey !== verificationKeyId) return reject(9);
+	if (unsupportedPublicExtension) return reject(7);
 	let input: Uint8Array;
 	try {
 		input = await openCountInputShare(
@@ -356,12 +376,17 @@ export async function helperCountJobInit(
 			publicShare,
 			ciphertext,
 			key,
+			nowMs,
 		);
 	} catch (cause) {
 		if (cause instanceof DAPError && cause.code === "InvalidHpkeConfig")
 			return reject(4);
 		if (cause instanceof DAPError && cause.code === "DecryptionFailed")
 			return reject(5);
+		if (cause instanceof DAPError && cause.code === "ReportTooEarly")
+			return reject(8);
+		if (cause instanceof DAPError && cause.code === "ReportDropped")
+			return reject(3);
 		return reject(7);
 	}
 	try {
@@ -407,4 +432,12 @@ export function leaderCountJobFinish(
 	const inbound = reader.vector(4, 1);
 	reader.end();
 	return { outputShare: leaderCountFinish(state, inbound) };
+}
+
+/** Add a verified Count output share to a stored aggregate share. */
+export function addCountOutputShare(
+	current: Uint8Array,
+	next: Uint8Array,
+): Uint8Array {
+	return encoded([mod(elements(current, 1)[0]! + elements(next, 1)[0]!)]);
 }

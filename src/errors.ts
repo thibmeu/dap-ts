@@ -8,6 +8,8 @@ export type DAPErrorCode =
 	| "EncryptionFailed"
 	| "DecryptionFailed"
 	| "InvalidReport"
+	| "ReportTooEarly"
+	| "ReportDropped"
 	| "InvalidResponse"
 	| "HttpError";
 
