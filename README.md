@@ -8,6 +8,7 @@ Prepare encrypted measurements for two aggregators and process protocol response
 - [Example](#example)
 - [Usage](#usage)
 - [Collection](#collection)
+- [Aggregator primitive](#aggregator-primitive)
 - [Security considerations](#security-considerations)
 - [License](#license)
 
@@ -107,6 +108,35 @@ Prio3Sum, and Prio3Histogram profiles; the Janus DAP 18 upload test does not
 exercise collection. For sum tasks, completed progress has `sum` instead of
 `count`; both are `bigint`. Histogram tasks return `histogram`, an array of
 `bigint` bucket counts.
+
+## Aggregator primitive
+
+`dap-ts/aggregator` currently supports one DAP 19 Prio3Count report per
+aggregation job. Each server uses its own HPKE private key and the shared VDAF
+verification key. The caller handles authentication, HTTP, storage, and retries.
+
+```typescript
+import {
+  leaderCountJobInit, helperCountJobInit, leaderCountJobFinish,
+} from "dap-ts/aggregator";
+
+const leader = await leaderCountJobInit(task, report, leaderHpkeKey, 0, verifyKey);
+// Persist leader.request, leader.state, leader.reportId, and leader.time.
+const helper = await helperCountJobInit(task, leader.request, helperHpkeKey, 0, verifyKey);
+// If helper.outputShare exists, atomically claim the report and add the share
+// to its time bucket. Save helper.response before sending it to the leader.
+const result = leaderCountJobFinish(leader.state, leader.reportId, helper.response);
+if ("outputShare" in result) {
+  // Atomically claim the report and add result.outputShare to the leader bucket.
+}
+```
+
+`leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
+`privateKey`. The host must cache a response for each exact request body and
+return it on retry. Report claims, bucket collection checks, and output-share
+updates must be one atomic transaction per role. A response must not be sent
+before its helper output share and cached response are durable. This first
+slice has no multi-report jobs or Sum/Histogram verification.
 
 ## Security considerations
 

@@ -2,6 +2,8 @@ Prio3Count_0.json, Prio3Count_2.json, Prio3Sum_0.json, Prio3Sum_2.json,
 Prio3Histogram_0.json, Prio3Histogram_2.json,
 Prio3Histogram_bad_helper_jr_blind.json, Prio3Histogram_bad_leader_jr_blind.json,
 Prio3Histogram_bad_public_share.json, Prio3Histogram_bad_verifier_message.json,
+Prio3Count_bad_gadget_poly.json, Prio3Count_bad_helper_seed.json,
+Prio3Count_bad_meas_share.json, Prio3Count_bad_wire_seed.json,
 and XofTurboShake128.json are from the CFRG VDAF specification
 repository at commit 5203892540a95e564dfa978345d16b40baf3c65d.
 Source: https://github.com/cfrg/draft-irtf-cfrg-vdaf/tree/5203892540a95e564dfa978345d16b40baf3c65d/test_vec
