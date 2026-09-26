@@ -15,7 +15,7 @@ import {
 	openCountInputShare,
 } from "../src/aggregator.js";
 import { concat, uint } from "../src/binary.js";
-import { DAPClient } from "../src/client.js";
+import { Client } from "../src/client.js";
 import type { DAPError } from "../src/errors.js";
 import { decodeReport, encodeReport } from "../src/messages.js";
 import { unshardCount } from "../src/prio3-count.js";
@@ -118,7 +118,7 @@ it("rejects truncated and non-canonical peer messages", () => {
 });
 
 it("processes an encrypted DAP 19 report through a one-report aggregation job", async () => {
-	const client = new DAPClient(task, {
+	const client = new Client(task, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -197,7 +197,7 @@ it("processes an encrypted DAP 19 report through a one-report aggregation job", 
 });
 
 it("keeps mixed Count job results in report order", async () => {
-	const client = new DAPClient(task, { hpke, random: deterministicRandom() });
+	const client = new Client(task, { hpke, random: deterministicRandom() });
 	const [first, second, third] = await Promise.all(
 		[1, 1, 0].map(async (value) =>
 			decodeReport(encodeReport(await client.prepareReport(value))),
@@ -289,7 +289,7 @@ it("adds canonical Count output shares", () => {
 });
 
 it("rejects future and out-of-task-interval Count reports before decryption", async () => {
-	const client = new DAPClient(task, {
+	const client = new Client(task, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,

@@ -6,7 +6,7 @@ import {
 	leaderCountJobInit,
 	prepareAggregatorKey,
 } from "../src/aggregator.js";
-import { DAPClient } from "../src/client.js";
+import { Client } from "../src/client.js";
 import { decodeReport, encodeReport } from "../src/messages.js";
 import { P, unshardCount } from "../src/prio3-count.js";
 import { deterministicRandom, hpke, task } from "./fixtures.js";
@@ -162,7 +162,7 @@ const rawKey = Uint8Array.fromHex(hpkeVector.skRm);
 const verifyKey = new Uint8Array(32);
 
 it("resumes interrupted jobs and commits each share once", async () => {
-	const client = new DAPClient(task, {
+	const client = new Client(task, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -238,7 +238,7 @@ it("resumes interrupted jobs and commits each share once", async () => {
 });
 
 it("serializes competing jobs for the same report", async () => {
-	const client = new DAPClient(task, { hpke, clock: () => 179999 });
+	const client = new Client(task, { hpke, clock: () => 179999 });
 	const report = decodeReport(encodeReport(await client.prepareReport(1)));
 	const leaderKey = await prepareAggregatorKey({
 		configId: 7,

@@ -13,7 +13,12 @@ Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.c
 - Specification-vector tests for Prio3Count, TurboSHAKE, and HPKE.
 - README with a count-reporting example and usage guidance.
 - Source installs and package creation build the distributable JavaScript and declarations.
-- Separate count collector import with authenticated collection requests, resumable polling, HPKE decryption, and exact integer results.
+- Root `Collector` role with authenticated collection requests, resumable polling, HPKE decryption, and exact integer results.
+- Root `Leader` and `Helper` roles for explicit, persistable aggregation jobs.
+
+### Changed
+
+- Rename `DAPClient` to `Client` and expose all four roles from the package root. Low-level aggregator and collector modules are no longer package entry points.
 
 ### Fixed
 

@@ -2,7 +2,12 @@ import { expect, it } from "vitest";
 import { concat, uint, vector } from "../src/binary.js";
 import { Collector } from "../src/collector.js";
 import { createSuite } from "../src/hpke.js";
-import { prio3Histogram, prio3Sum, Task } from "../src/index.js";
+import {
+	prio3Histogram,
+	prio3Sum,
+	Collector as RootCollector,
+	Task,
+} from "../src/index.js";
 import {
 	decodeCollectionJobRequest,
 	decodeCollectionJobResponse,
@@ -118,7 +123,10 @@ it("decrypts bounded sum shares and rejects results above the batch bound", asyn
 		vdaf: prio3Sum(1337),
 	});
 	const { suite, pair, privateKey } = await keys();
-	const collector = new Collector(sumTask, { configId: 7, privateKey });
+	const collector = await RootCollector.create(sumTask, {
+		configId: 7,
+		privateKey,
+	});
 	const prepared = collector.prepare({ start: 10, duration: 2 });
 	const aad = concat(
 		Uint8Array.fromBase64(sumTask.id, { alphabet: "base64url" }),

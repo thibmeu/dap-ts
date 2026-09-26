@@ -17,7 +17,7 @@ Prepare encrypted measurements for two aggregators and process protocol response
 Use the task configuration agreed with your leader and helper:
 
 ```typescript
-import { DAPClient, HpkeConfigList, Task, prio3Count } from "dap-ts";
+import { Client, HpkeConfigList, Task, prio3Count } from "dap-ts";
 
 const task = Task.create({
   id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
@@ -34,7 +34,7 @@ const hpke = {
   leader: HpkeConfigList.parse(leaderHpkeConfigBytes),
   helper: HpkeConfigList.parse(helperHpkeConfigBytes),
 };
-const client = new DAPClient(task, { hpke });
+const client = new Client(task, { hpke });
 const report = await client.prepareReport(1);
 const upload = client.prepareUpload([report]);
 const response = await fetch(upload.request.url, {
@@ -82,14 +82,14 @@ supports values from 1 through 4096 for each.
 
 ## Collection
 
-Collection is a separate backend import. The collector HPKE key and HTTP
+Collection uses the backend-only Collector role. The collector HPKE key and HTTP
 credentials must stay on the backend. Both aggregators must have the matching
 collector HPKE configuration.
 
 ```typescript
-import { Collector } from "dap-ts/collector";
+import { Collector } from "dap-ts";
 
-const collector = new Collector(task, {
+const collector = await Collector.create(task, {
   configId: collectorConfigId,
   privateKey: collectorPrivateKey,
 });
@@ -111,40 +111,38 @@ exercise collection. For sum tasks, completed progress has `sum` instead of
 
 ## Aggregator primitive
 
-`dap-ts/aggregator` supports DAP 19 Prio3Count, Prio3Sum, and
-Prio3Histogram jobs with one or more reports.
-Each server uses its own HPKE private key and the shared VDAF
-verification key. The caller handles authentication, HTTP, storage, and retries.
+`Leader` and `Helper` support DAP 19 Prio3Count, Prio3Sum, and
+Prio3Histogram jobs with one or more reports. Each server supplies its own
+HPKE private key and the shared VDAF verification key.
 
 ```typescript
-import {
-  leaderPrio3BatchInit, helperPrio3BatchInit, leaderPrio3BatchFinish,
-  addPrio3OutputShare, prepareAggregatorKey,
-} from "dap-ts/aggregator";
+import { Helper, Leader } from "dap-ts";
 
-const leaderKey = await prepareAggregatorKey(leaderHpkeKey);
-const helperKey = await prepareAggregatorKey(helperHpkeKey);
-const leader = await leaderPrio3BatchInit(task, reports, leaderKey, 0, verifyKey);
-const helper = await helperPrio3BatchInit(task, leader.request, helperKey, 0, verifyKey);
-const results = leaderPrio3BatchFinish(task, leader.reports, helper.response);
-// In the host's atomic bucket update:
+const leader = await Leader.create(task, {
+  hpke: leaderHpkeKey, verificationKeyId: 0, verifyKey,
+});
+const helper = await Helper.create(task, {
+  hpke: helperHpkeKey, verificationKeyId: 0, verifyKey,
+});
+const job = await leader.prepare(reports);
+// Store job.request and job.reports before sending the request.
+const verified = await helper.verify(job.request);
+// The Helper host commits accepted shares and caches its exact final response.
+const results = leader.finish(job.reports, verified.response);
+// The Leader host commits accepted shares and caches its exact response.
 if (results[0] && "outputShare" in results[0])
-  bucket.share = addPrio3OutputShare(task, bucket.share, results[0].outputShare);
+  bucket.share = leader.addShare(bucket.share, results[0].outputShare);
 ```
 
-`leaderHpkeKey` and `helperHpkeKey` each contain `configId` and a 32-byte
-`privateKey`. Prepare each key once when starting a server. Raw keys still work
-for occasional calls. Before sending `leader.request`, store it with
-`leader.reports`. Before sending `helper.response`, atomically check replay and
-collection state for each report, add accepted Helper output shares once, and
-cache the exact response. The Leader then validates the response and commits
-each accepted output share once.
-Return cached bytes on retry; reject a reused job ID with different bytes.
-Keep a bucket with a pending Leader job out of collection. The host can encode
-replay or collected-bucket errors with `encodeCountJobRejection()`.
-Check each result for `outputShare` before adding it; rejected reports have
-`reportError`. The Count-specific functions remain available. Sinbad's
-current server example uses Count only.
+`job.reports` contains each report ID, time, and verifier state as bytes. Persist
+it with the exact request before sending the job to the Helper. The Helper host
+must atomically check replay and collected buckets, add each accepted share
+with `helper.addShare()`, and cache its final response bytes before replying.
+Use `helper.reject(reportId, code)` to replace a per-report response when a
+host check fails. The Leader host then finishes from its saved states and
+commits each accepted share once. Return cached bytes on retry, reject a reused
+job ID with different bytes, and keep buckets with pending Leader jobs out of
+collection. Authentication, HTTP, scheduling, and storage belong to the host.
 
 `npm run bench:aggregator` measures the local one-report Count path on Node,
 with raw and prepared keys. It excludes HTTP and storage. Compare deployments

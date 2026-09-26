@@ -14,14 +14,6 @@
     "./messages": {
       "types": "./dist/messages.d.ts",
       "default": "./dist/messages.js"
-    },
-    "./collector": {
-      "types": "./dist/collector.d.ts",
-      "default": "./dist/collector.js"
-    },
-    "./aggregator": {
-      "types": "./dist/aggregator.d.ts",
-      "default": "./dist/aggregator.js"
     }
   },
   "files": [

@@ -178,15 +178,10 @@ it("rejects changed Histogram proof, measurement, blind, and field encoding", ()
 	expect(() => check(nonCanonical)).toThrow();
 });
 
-import {
-	addPrio3OutputShare,
-	helperPrio3BatchInit,
-	leaderPrio3BatchFinish,
-	leaderPrio3BatchInit,
-	leaderPrio3JobFinish,
-} from "../src/aggregator.js";
+import { leaderPrio3JobFinish } from "../src/aggregator.js";
 import { concat } from "../src/binary.js";
-import { DAPClient } from "../src/client.js";
+import { Client } from "../src/client.js";
+import { Helper, Leader } from "../src/index.js";
 import { decodeReport, encodeReport } from "../src/messages.js";
 import { prio3Histogram, unshardHistogram } from "../src/prio3-histogram.js";
 import { prio3Sum, unshardSum } from "../src/prio3-sum.js";
@@ -200,7 +195,7 @@ for (const [name, vdaf, values, result] of [
 ] as const) {
 	it(`${name}: verifies encrypted reports through a mixed DAP 19 batch`, async () => {
 		const task = Task.create({ ...taskOptions, vdaf });
-		const client = new DAPClient(task, { hpke, random: deterministicRandom() });
+		const client = new Client(task, { hpke, random: deterministicRandom() });
 		const reports = [];
 		for (const value of values)
 			reports.push(
@@ -220,48 +215,50 @@ for (const [name, vdaf, values, result] of [
 		const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
 		const helperKey = { configId: 8, privateKey: bytes(hpkeVector.skRm) };
 		const verifyKey = bytes(sum0.verify_key);
-		const leader = await leaderPrio3BatchInit(
-			task,
-			[...reports, damaged],
-			leaderKey,
-			0,
+		const leader = await Leader.create(task, {
+			hpke: leaderKey,
+			verificationKeyId: 0,
 			verifyKey,
-		);
-		const helper = await helperPrio3BatchInit(
-			task,
-			leader.request,
-			helperKey,
-			0,
+		});
+		const helper = await Helper.create(task, {
+			hpke: helperKey,
+			verificationKeyId: 0,
 			verifyKey,
-		);
-		const finished = leaderPrio3BatchFinish(
-			task,
-			leader.reports,
-			helper.response,
-		);
+		});
+		const job = await leader.prepare([...reports, damaged]);
+		const verified = await helper.verify(job.request);
+		const finished = leader.finish(job.reports, verified.response);
+		expect(
+			leader.finish(
+				job.reports,
+				concat(
+					helper.reject(job.reports[0]!.reportId, 2),
+					...verified.reports.slice(1).map((item) => item.response),
+				),
+			)[0],
+		).toMatchObject({ reportError: 2 });
 		expect(finished.map((item) => item.reportId)).toEqual(
-			leader.reports.map((item) => item.reportId),
+			job.reports.map((item) => item.reportId),
 		);
 		expect(finished[2]).toMatchObject({ reportError: 5 });
 		expect(() =>
-			leaderPrio3BatchFinish(
-				task,
-				leader.reports,
+			leader.finish(
+				job.reports,
 				concat(
-					helper.reports[1]!.response,
-					helper.reports[0]!.response,
-					helper.reports[2]!.response,
+					verified.reports[1]!.response,
+					verified.reports[0]!.response,
+					verified.reports[2]!.response,
 				),
 			),
 		).toThrow();
 		if (name === "Histogram") {
-			const changed = helper.reports[0]!.response.slice();
+			const changed = verified.reports[0]!.response.slice();
 			changed[changed.length - 1]! ^= 1;
 			expect(() =>
 				leaderPrio3JobFinish(
 					task,
-					leader.reports[0]!.state,
-					leader.reports[0]!.reportId,
+					job.reports[0]!.state,
+					job.reports[0]!.reportId,
 					changed,
 				),
 			).toThrow();
@@ -270,23 +267,23 @@ for (const [name, vdaf, values, result] of [
 			if (!("outputShare" in item)) throw new Error("Expected output share");
 			return item.outputShare;
 		});
-		const helperShares = helper.reports.slice(0, 2).map((item) => {
+		const helperShares = verified.reports.slice(0, 2).map((item) => {
 			if (!item.outputShare) throw new Error("Expected output share");
 			return item.outputShare;
 		});
 		if (name === "Sum") {
 			expect(
 				unshardSum([
-					addPrio3OutputShare(task, leaderShares[0]!, leaderShares[1]!),
-					addPrio3OutputShare(task, helperShares[0]!, helperShares[1]!),
+					leader.addShare(leaderShares[0]!, leaderShares[1]!),
+					helper.addShare(helperShares[0]!, helperShares[1]!),
 				]),
 			).toBe(result);
 		} else {
 			expect(
 				unshardHistogram(
 					[
-						addPrio3OutputShare(task, leaderShares[0]!, leaderShares[1]!),
-						addPrio3OutputShare(task, helperShares[0]!, helperShares[1]!),
+						leader.addShare(leaderShares[0]!, leaderShares[1]!),
+						helper.addShare(helperShares[0]!, helperShares[1]!),
 					],
 					4,
 				),

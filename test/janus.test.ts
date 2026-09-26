@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { DAPClient, HpkeConfigList, prio3Count, Task } from "../src/index.js";
+import { Client, HpkeConfigList, prio3Count, Task } from "../src/index.js";
 
 const enabled = process.env.JANUS_INTEROP === "1";
 const leader = "http://leader:8080/";
@@ -96,7 +96,7 @@ it.skipIf(!enabled)(
 			expect(result, result.error).toMatchObject({ status: "success" });
 		}
 
-		const client = new DAPClient(task, { hpke });
+		const client = new Client(task, { hpke });
 		const upload = client.prepareUpload([await client.prepareReport(1)]);
 		const response = await localFetch(upload.request.url, {
 			method: upload.request.method,

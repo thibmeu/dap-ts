@@ -1,6 +1,6 @@
 import {
-	DAPClient,
-	type DAPClientOptions,
+	Client,
+	type ClientOptions,
 	type PreparedReport,
 	prio3Count,
 	prio3Histogram,
@@ -9,7 +9,7 @@ import {
 } from "../src/index.js";
 
 // Compile-only checks for the public measurement type and opaque reports.
-export async function check(options: DAPClientOptions) {
+export async function check(options: ClientOptions) {
 	const task = Task.create({
 		id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
 		leader: "https://l/",
@@ -19,7 +19,7 @@ export async function check(options: DAPClientOptions) {
 		batchMode: "time-interval",
 		vdaf: prio3Count(),
 	});
-	const client = new DAPClient(task, options);
+	const client = new Client(task, options);
 	await client.prepareReport(1);
 	await client.prepareReport(2); // Valid number type, rejected at runtime.
 	// @ts-expect-error Count measurements are numbers.
@@ -30,8 +30,8 @@ export async function check(options: DAPClientOptions) {
 		id: task.id,
 		configuration: task.encodeConfiguration(),
 	}).expect(prio3Count());
-	const narrowed = new DAPClient(decoded, options);
-	const sum = new DAPClient(
+	const narrowed = new Client(decoded, options);
+	const sum = new Client(
 		Task.create({
 			id: task.id,
 			leader: task.leader,
@@ -45,7 +45,7 @@ export async function check(options: DAPClientOptions) {
 	);
 	await sum.prepareReport(42n);
 	await sum.prepareReport(42);
-	const histogram = new DAPClient(
+	const histogram = new Client(
 		Task.create({
 			id: task.id,
 			leader: task.leader,

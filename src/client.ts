@@ -66,7 +66,7 @@ export interface PreparedUpload {
 	readonly request: DAPRequest;
 	process(response: DAPResponse): UploadResult;
 }
-export interface DAPClientOptions {
+export interface ClientOptions {
 	readonly hpke: AggregatorHpkeConfigs;
 	readonly random?: RandomSource;
 	/** Unix milliseconds, as returned by Date.now(). */
@@ -199,7 +199,7 @@ function processUpload(
 	});
 }
 
-export class DAPClient<M> {
+export class Client<M> {
 	readonly task: Task<M>;
 	#hpke: AggregatorHpkeConfigs;
 	#configs: readonly [HpkeConfig, HpkeConfig];
@@ -210,7 +210,7 @@ export class DAPClient<M> {
 	#clock: () => number;
 	#binding: string;
 
-	constructor(task: Task<M>, options: DAPClientOptions) {
+	constructor(task: Task<M>, options: ClientOptions) {
 		if (!(task instanceof Task))
 			throw new DAPError("InvalidTask", "Expected a Task");
 		this.task = task;
@@ -230,8 +230,8 @@ export class DAPClient<M> {
 		Object.freeze(this);
 	}
 
-	withHpkeConfigs(hpke: AggregatorHpkeConfigs): DAPClient<M> {
-		return new DAPClient(this.task, {
+	withHpkeConfigs(hpke: AggregatorHpkeConfigs): Client<M> {
+		return new Client(this.task, {
 			hpke,
 			clock: this.#clock,
 			...(this.#customRandom ? { random: this.#customRandom } : {}),

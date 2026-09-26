@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { concat, decodeId, Reader } from "../src/binary.js";
 import { createSuite } from "../src/hpke.js";
 import {
-	DAPClient,
+	Client,
 	DAPError,
 	HpkeConfigList,
 	prio3Histogram,
@@ -47,7 +47,7 @@ it("matches RFC 9180 Appendix A.1.1, including the deterministic encapsulation",
 });
 
 it("prepares an encrypted count report with the exact DAP task/role binding", async () => {
-	const client = new DAPClient(task, {
+	const client = new Client(task, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -102,7 +102,7 @@ it("prepares an encrypted count report with the exact DAP task/role binding", as
 			}),
 		).rejects.toThrow();
 	}
-	const same = await new DAPClient(task, {
+	const same = await new Client(task, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -126,7 +126,7 @@ it("round-trips a bounded sum task and encrypts its published VDAF shares", asyn
 			configuration: sumTask.encodeConfiguration(),
 		}).expect(prio3Sum(255)),
 	).toThrow();
-	const client = new DAPClient(sumTask, {
+	const client = new Client(sumTask, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -182,7 +182,7 @@ it("round-trips a histogram task and encrypts its VDAF shares", async () => {
 		histogramTask.encodeConfiguration(),
 	);
 	expect(() => decoded.expect(prio3Histogram(5, 2))).toThrow();
-	const client = new DAPClient(histogramTask, {
+	const client = new Client(histogramTask, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -226,7 +226,7 @@ it("round-trips a histogram task and encrypts its VDAF shares", async () => {
 });
 
 it("snapshots extensions before encryption and detects duplicate scopes", async () => {
-	const client = new DAPClient(task, { hpke });
+	const client = new Client(task, { hpke });
 	const data = hex("0102");
 	const extensions = [{ type: 100, data }];
 	const pending = client.prepareReport(0, { publicExtensions: extensions });
@@ -262,14 +262,14 @@ it("rejects unsupported HPKE suites early and rotates keys explicitly", async ()
 	);
 	expect(
 		() =>
-			new DAPClient(task, {
+			new Client(task, {
 				hpke: { leader: unsupported, helper: hpke.helper },
 			}),
 	).toThrow(DAPError);
 	const mixed = HpkeConfigList.parse(
 		encodeHpkeConfigList([{ ...config, id: 1, kemId: 65535 }, config]),
 	);
-	const client = new DAPClient(task, {
+	const client = new Client(task, {
 		hpke: { leader: mixed, helper: hpke.helper },
 	});
 	const old = await client.prepareReport(1);
@@ -287,7 +287,7 @@ it("rejects unsupported HPKE suites early and rotates keys explicitly", async ()
 });
 
 it("validates measurement, time, and random-source inputs", async () => {
-	const client = new DAPClient(task, { hpke });
+	const client = new Client(task, { hpke });
 	for (const measurement of [2, -1, NaN, 0.5, true, "1"])
 		await expect(
 			client.prepareReport(measurement as number),
@@ -295,7 +295,7 @@ it("validates measurement, time, and random-source inputs", async () => {
 	for (const time of [-1, NaN, Infinity, 1.2, new Date(NaN)])
 		await expect(client.prepareReport(1, { time })).rejects.toThrow();
 	await expect(
-		new DAPClient(task, {
+		new Client(task, {
 			hpke,
 			random: () => new Uint8Array(1),
 		}).prepareReport(1),
@@ -307,7 +307,7 @@ it("validates measurement, time, and random-source inputs", async () => {
 
 describe("bulk uploads", () => {
 	it("owns report bytes, binds tasks, and reuses report IDs for retries", async () => {
-		const client = new DAPClient(task, { hpke });
+		const client = new Client(task, { hpke });
 		const reports = await client.prepareReports([1, 0, 1]);
 		const upload = client.prepareUpload(reports);
 		const first = upload.request.body!.slice();
@@ -320,14 +320,13 @@ describe("bulk uploads", () => {
 		expect(() =>
 			client.prepareUpload([{ id: reports[0]!.id, time: 0 } as never]),
 		).toThrow();
-		const other = new DAPClient(
-			Task.create({ ...taskOptions, info: "other" }),
-			{ hpke },
-		);
+		const other = new Client(Task.create({ ...taskOptions, info: "other" }), {
+			hpke,
+		});
 		expect(() => other.prepareUpload(reports)).toThrow();
 	});
 	it("processes partial failures in submission order and preserves unknown codes", async () => {
-		const client = new DAPClient(task, { hpke });
+		const client = new Client(task, { hpke });
 		const reports = await client.prepareReports([1, 0, 1]);
 		const upload = client.prepareUpload(reports);
 		const status = (i: number, code: number) =>
@@ -383,12 +382,12 @@ describe("bulk uploads", () => {
 		).toThrow(DAPError);
 	});
 	it("bounds concurrency and preserves measurement order", async () => {
-		const client = new DAPClient(task, { hpke });
-		const original = DAPClient.prototype.prepareReport;
+		const client = new Client(task, { hpke });
+		const original = Client.prototype.prepareReport;
 		let active = 0,
 			maximum = 0;
 		const spy = vi
-			.spyOn(DAPClient.prototype, "prepareReport")
+			.spyOn(Client.prototype, "prepareReport")
 			.mockImplementation(async function (measurement, options) {
 				active++;
 				maximum = Math.max(maximum, active);
