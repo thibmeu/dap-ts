@@ -42,7 +42,7 @@ export async function prepareRecipientKey(
 	privateBytes: Uint8Array,
 ): Promise<CryptoKeyPair> {
 	const suite = createSuite();
-	const secret = bytes(privateBytes, 32).slice();
+	const secret = Uint8Array.from(bytes(privateBytes, 32));
 	try {
 		const temporary = await suite.DeserializePrivateKey(secret, true);
 		const jwk = await crypto.subtle.exportKey("jwk", temporary);

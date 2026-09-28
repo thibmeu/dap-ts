@@ -27,7 +27,7 @@ export type { PreparedReport, ReportId } from "./reports.js";
 export type { EncodedTask, TaskOptions } from "./task.js";
 export { Task } from "./task.js";
 
-import type { Report } from "./messages.js";
+import type { HpkeConfig, Report } from "./messages.js";
 import type { Task } from "./task.js";
 
 export type AggregatorOptions = {
@@ -56,6 +56,12 @@ export const Leader = {
 			) => core.leaderPrio3BatchFinish(task, reports, response),
 			addShare: (current: Uint8Array, next: Uint8Array) =>
 				core.addPrio3OutputShare(task, current, next),
+			encryptShare: (
+				request: Uint8Array,
+				share: Uint8Array,
+				collector: HpkeConfig,
+			) =>
+				core.encryptAggregateShare(task, "leader", request, share, collector),
 		};
 	},
 } as const;
@@ -77,6 +83,12 @@ export const Helper = {
 			reject: core.encodeCountJobRejection,
 			addShare: (current: Uint8Array, next: Uint8Array) =>
 				core.addPrio3OutputShare(task, current, next),
+			encryptShare: (
+				request: Uint8Array,
+				share: Uint8Array,
+				collector: HpkeConfig,
+			) =>
+				core.encryptAggregateShare(task, "helper", request, share, collector),
 		};
 	},
 } as const;

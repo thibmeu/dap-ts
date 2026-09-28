@@ -66,7 +66,7 @@ export interface CollectionJobResponse {
 	readonly helper: HpkeCiphertext;
 }
 
-/** Prio3Count has an empty aggregation parameter and no collection extensions. */
+/** The supported Prio3 VDAFs have empty aggregation parameters and collection extensions. */
 export function encodeCollectionJobRequest(
 	start: number | bigint,
 	duration: number | bigint,
@@ -131,6 +131,75 @@ export function decodeCollectionJobResponse(
 	if (duration === 0n || start + duration > 0xffffffffffffffffn)
 		throw new DAPError("InvalidMessage", "Invalid collection interval");
 	return result;
+}
+
+export function encodeCollectionJobResponse(
+	value: CollectionJobResponse,
+): Uint8Array {
+	return concat(
+		uint(value.reportCount, 8),
+		uint(value.start, 8),
+		uint(value.duration, 8),
+		encodeCiphertext(value.leader),
+		encodeCiphertext(value.helper),
+	);
+}
+
+export function encodeAggregateShareRequest(
+	collectionRequest: Uint8Array,
+	reportCount: number | bigint,
+	checksum: Uint8Array,
+): Uint8Array {
+	const { start, duration } = decodeCollectionJobRequest(collectionRequest);
+	return concat(
+		collectionRequest,
+		uint(1, 1),
+		vector(concat(uint(start, 8), uint(duration, 8)), 2),
+		uint(reportCount, 8),
+		bytes(checksum, 32),
+	);
+}
+
+export function decodeAggregateShareRequest(input: Uint8Array): {
+	collectionRequest: Uint8Array;
+	start: bigint;
+	duration: bigint;
+	reportCount: bigint;
+	checksum: Uint8Array;
+} {
+	const reader = new Reader(input);
+	const collectionRequest = reader.take(25);
+	const { start, duration } = decodeCollectionJobRequest(collectionRequest);
+	if (reader.uint(1) !== 1)
+		throw new DAPError(
+			"InvalidMessage",
+			"Expected time-interval batch selector",
+		);
+	const selector = new Reader(reader.vector(2));
+	const selectedStart = selector.u64();
+	const selectedDuration = selector.u64();
+	selector.end();
+	const reportCount = reader.u64();
+	const checksum = reader.take(32);
+	reader.end();
+	if (selectedStart !== start || selectedDuration !== duration)
+		throw new DAPError("InvalidMessage", "Batch selector does not match query");
+	return { collectionRequest, start, duration, reportCount, checksum };
+}
+
+export function encodeAggregateShare(ciphertext: HpkeCiphertext): Uint8Array {
+	return encodeCiphertext(ciphertext);
+}
+
+export function decodeAggregateShare(input: Uint8Array): HpkeCiphertext {
+	const reader = new Reader(input);
+	const value = {
+		configId: reader.uint(1),
+		enc: reader.vector(2, 1),
+		payload: reader.vector(4, 1),
+	};
+	reader.end();
+	return value;
 }
 
 export function encodeExtensions(

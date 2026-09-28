@@ -26,9 +26,11 @@ import {
 import { DAPError } from "./errors.js";
 import { createSuite, prepareRecipientKey } from "./hpke.js";
 import {
+	decodeCollectionJobRequest,
 	encodeInputShareAad,
 	encodeReportMetadata,
 	type HpkeCiphertext,
+	type HpkeConfig,
 	type Report,
 	type ReportMetadata,
 } from "./messages.js";
@@ -39,6 +41,43 @@ import { Task } from "./task.js";
 const HALF = (P + 1n) / 2n;
 const ROOT4 = 281474976710656n;
 const suite = createSuite();
+
+/** Seal a committed aggregate share to the task's collector (DAP 19). */
+export async function encryptAggregateShare(
+	task: Task<unknown>,
+	role: "leader" | "helper",
+	collectionRequest: Uint8Array,
+	share: Uint8Array,
+	collector: HpkeConfig,
+): Promise<HpkeCiphertext> {
+	requirePrio3Task(task);
+	decodeCollectionJobRequest(collectionRequest);
+	if (collector.kemId !== 32 || collector.kdfId !== 1 || collector.aeadId !== 1)
+		throw new DAPError(
+			"UnsupportedCipherSuite",
+			"Unsupported collector HPKE suite",
+		);
+	uint(collector.id, 1);
+	const publicKey = await suite.DeserializePublicKey(
+		bytes(collector.publicKey, 32),
+	);
+	const sealed = await suite.Seal(publicKey, bytes(share), {
+		info: concat(
+			new TextEncoder().encode("dap-19 aggregate share"),
+			Uint8Array.of(role === "leader" ? 2 : 3, 0),
+		),
+		aad: concat(
+			decodeId(task.id, 32),
+			task.encodeConfiguration(),
+			collectionRequest,
+		),
+	});
+	return {
+		configId: collector.id,
+		enc: sealed.encapsulatedSecret,
+		payload: sealed.ciphertext,
+	};
+}
 
 function elements(input: Uint8Array, length: number): bigint[] {
 	requireBytes(input, length * 8);

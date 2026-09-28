@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { concat, uint, vector } from "../src/binary.js";
 import { Collector } from "../src/collector.js";
-import { createSuite } from "../src/hpke.js";
+import { createSuite, prepareRecipientKey } from "../src/hpke.js";
 import {
 	prio3Histogram,
 	prio3Sum,
@@ -9,15 +9,49 @@ import {
 	Task,
 } from "../src/index.js";
 import {
+	decodeAggregateShareRequest,
 	decodeCollectionJobRequest,
 	decodeCollectionJobResponse,
+	encodeAggregateShareRequest,
 	encodeCollectionJobRequest,
+	encodeCollectionJobResponse,
 } from "../src/messages.js";
 import { task } from "./fixtures.js";
 
 const jobId = "lc7aUeGpdSNosNlh-UZhKA";
 const location = `/tasks/${task.id}/collection_jobs/${jobId}`;
 const text = new TextEncoder();
+
+it("round trips DAP 19 collection and aggregate share messages", () => {
+	const request = encodeCollectionJobRequest(10, 1);
+	const checksum = new Uint8Array(32).fill(7);
+	const aggregate = encodeAggregateShareRequest(request, 42, checksum);
+	expect(decodeAggregateShareRequest(aggregate)).toEqual({
+		collectionRequest: request,
+		start: 10n,
+		duration: 1n,
+		reportCount: 42n,
+		checksum,
+	});
+	const malformed = aggregate.slice();
+	malformed[43] = 2;
+	expect(() => decodeAggregateShareRequest(malformed)).toThrow();
+	const ciphertext = {
+		configId: 7,
+		enc: new Uint8Array(32),
+		payload: new Uint8Array(8),
+	};
+	const response = {
+		reportCount: 42n,
+		start: 10n,
+		duration: 1n,
+		leader: ciphertext,
+		helper: ciphertext,
+	};
+	expect(
+		decodeCollectionJobResponse(encodeCollectionJobResponse(response)),
+	).toEqual(response);
+});
 
 async function keys() {
 	const suite = createSuite();
@@ -28,6 +62,13 @@ async function keys() {
 		privateKey: await suite.SerializePrivateKey(pair.privateKey),
 	};
 }
+
+it("does not zero a caller-owned Node Buffer private key", async () => {
+	const { privateKey } = await keys();
+	const input = Buffer.from(privateKey);
+	await prepareRecipientKey(input);
+	expect(input).toEqual(Buffer.from(privateKey));
+});
 
 async function completed(
 	collector: Collector,
