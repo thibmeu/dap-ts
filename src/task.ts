@@ -1,4 +1,4 @@
-import { base64url, bytes, concat, decodeId, Reader, uint } from "./binary.js";
+import { base64url, bytes, decodeId, Reader } from "./binary.js";
 import { DAPError } from "./errors.js";
 import {
 	type DecodeOptions,
@@ -7,20 +7,24 @@ import {
 	encodeTaskConfiguration,
 	type TaskConfiguration,
 } from "./messages.js";
-import { type ClientVdaf, prio3Count } from "./prio3-count.js";
-import { prio3Histogram } from "./prio3-histogram.js";
-import { prio3Sum } from "./prio3-sum.js";
+import {
+	checkVdaf,
+	decodeVdaf,
+	encodeVdaf,
+	sameVdaf,
+	type Vdaf,
+} from "./vdaf.js";
 
-export interface TaskOptions<M> {
+export interface TaskOptions<V extends Vdaf> {
 	readonly id: string;
 	readonly info?: string | Uint8Array;
 	readonly leader: string;
 	readonly helper: string;
-	/** Seconds per DAP time unit. */
+	/** Seconds per DAP time unit. Report times and batch buckets use it. */
 	readonly timePrecision: number;
 	readonly minBatchSize: number;
 	readonly batchMode: "time-interval";
-	readonly vdaf: ClientVdaf<M>;
+	readonly vdaf: V;
 	readonly extensions?: readonly Extension[];
 	/** Test-only compatibility with Janus's unreleased DAP 18 profile. */
 	readonly testOnly?: {
@@ -72,14 +76,14 @@ function positiveSafe(value: bigint): number {
 	return Number(value);
 }
 
-export class Task<M> {
+export class Task<V extends Vdaf = Vdaf> {
 	readonly id: string;
 	readonly leader: string;
 	readonly helper: string;
 	readonly timePrecision: number;
 	readonly minBatchSize: number;
 	readonly batchMode = "time-interval" as const;
-	readonly vdaf: ClientVdaf<M>;
+	readonly vdaf: V;
 	/** @internal Test compatibility; production tasks always use DAP 19. */
 	readonly dapVersion: 18 | 19;
 	#configuration: Uint8Array;
@@ -90,7 +94,7 @@ export class Task<M> {
 		id: string,
 		encoded: Uint8Array,
 		configuration: TaskConfiguration,
-		testOnly?: TaskOptions<unknown>["testOnly"],
+		testOnly?: TaskOptions<Vdaf>["testOnly"],
 	) {
 		this.id = base64url(decodeId(id, 32));
 		this.leader = endpoint(configuration.leader, testOnly?.allowInsecureHttp);
@@ -104,36 +108,15 @@ export class Task<M> {
 				"Only time-interval batches are supported",
 			);
 		}
-		let vdaf: ClientVdaf<unknown>;
-		if (configuration.vdafType === 1 && !configuration.vdafConfig.length) {
-			vdaf = prio3Count();
-		} else if (
-			configuration.vdafType === 2 &&
-			configuration.vdafConfig.length === 8 &&
-			!testOnly
-		) {
-			const limit = new Reader(configuration.vdafConfig).u64();
-			try {
-				vdaf = prio3Sum(limit);
-			} catch (cause) {
-				throw new DAPError("InvalidTask", "Invalid Prio3Sum bound", { cause });
-			}
-		} else if (
-			configuration.vdafType === 4 &&
-			configuration.vdafConfig.length === 8 &&
-			!testOnly
-		) {
-			const reader = new Reader(configuration.vdafConfig);
-			try {
-				vdaf = prio3Histogram(reader.uint(4), reader.uint(4));
-			} catch (cause) {
-				throw new DAPError("InvalidTask", "Invalid Prio3Histogram parameters", {
-					cause,
-				});
-			}
-		} else {
-			throw new DAPError("UnsupportedVdaf", "Unsupported VDAF configuration");
+		let vdaf: Vdaf | undefined;
+		try {
+			vdaf = decodeVdaf(configuration.vdafType, configuration.vdafConfig);
+		} catch (cause) {
+			throw new DAPError("InvalidTask", "Invalid VDAF parameters", { cause });
 		}
+		// The DAP 18 test-only profile covers Count alone.
+		if (!vdaf || (testOnly && vdaf.type !== "prio3-count"))
+			throw new DAPError("UnsupportedVdaf", "Unsupported VDAF configuration");
 		for (const extension of configuration.extensions) {
 			if (extension.type !== 1)
 				throw new DAPError("InvalidTask", "Unrecognized task extension");
@@ -146,27 +129,21 @@ export class Task<M> {
 			}
 			this.#interval = { start, end: start + duration };
 		}
-		this.vdaf = vdaf as ClientVdaf<M>;
+		this.vdaf = vdaf as V;
 		this.#info = configuration.info.slice();
 		this.#configuration = encoded.slice();
 		Object.freeze(this);
 	}
 
-	static create<M>(options: TaskOptions<M>): Task<M> {
-		if (
-			options.vdaf !== prio3Count() &&
-			(options.vdaf?.type !== "prio3-sum" ||
-				options.vdaf.maxMeasurement === undefined ||
-				options.vdaf !== prio3Sum(options.vdaf.maxMeasurement) ||
-				options.testOnly) &&
-			(options.vdaf?.type !== "prio3-histogram" ||
-				options.vdaf.length === undefined ||
-				options.vdaf.chunkLength === undefined ||
-				options.vdaf !==
-					prio3Histogram(options.vdaf.length, options.vdaf.chunkLength) ||
-				options.testOnly)
-		)
-			throw new DAPError("UnsupportedVdaf", "Use a built-in VDAF factory");
+	static create<V extends Vdaf>(options: TaskOptions<V>): Task<V> {
+		let vdaf: Vdaf;
+		try {
+			vdaf = checkVdaf(options.vdaf);
+		} catch (cause) {
+			throw new DAPError("UnsupportedVdaf", "Invalid VDAF configuration", {
+				cause,
+			});
+		}
 		if (options.batchMode !== "time-interval")
 			throw new DAPError("InvalidTask", "Unsupported batch mode");
 		if (
@@ -185,6 +162,7 @@ export class Task<M> {
 			throw new DAPError("InvalidTask", "Endpoints must be strings");
 		}
 		const text = new TextEncoder();
+		const { type, config } = encodeVdaf(vdaf);
 		const configuration: TaskConfiguration = {
 			info:
 				typeof options.info === "string"
@@ -196,24 +174,11 @@ export class Task<M> {
 			minBatchSize: BigInt(options.minBatchSize),
 			batchMode: 1,
 			batchConfig: new Uint8Array(),
-			vdafType:
-				options.vdaf.type === "prio3-count"
-					? 1
-					: options.vdaf.type === "prio3-sum"
-						? 2
-						: 4,
-			vdafConfig:
-				options.vdaf.type === "prio3-count"
-					? new Uint8Array()
-					: options.vdaf.type === "prio3-sum"
-						? uint(options.vdaf.maxMeasurement!, 8)
-						: concat(
-								uint(options.vdaf.length!, 4),
-								uint(options.vdaf.chunkLength!, 4),
-							),
+			vdafType: type,
+			vdafConfig: config,
 			extensions: options.extensions ?? [],
 		};
-		return new Task<M>(
+		return new Task<V>(
 			options.id,
 			encodeTaskConfiguration(configuration),
 			configuration,
@@ -221,7 +186,8 @@ export class Task<M> {
 		);
 	}
 
-	static decode(input: EncodedTask, options?: DecodeOptions): Task<unknown> {
+	/** Read a provisioned task. Narrow its VDAF with `expect()`. */
+	static decode(input: EncodedTask, options?: DecodeOptions): Task {
 		const encoded = bytes(input.configuration).slice();
 		return new Task(
 			input.id,
@@ -230,32 +196,42 @@ export class Task<M> {
 		);
 	}
 
-	expect<N>(vdaf: ClientVdaf<N>): Task<N> {
-		if ((vdaf as unknown) !== this.vdaf)
+	expect<W extends Vdaf>(vdaf: W): Task<W> {
+		if (!sameVdaf(vdaf, this.vdaf))
 			throw new DAPError("UnsupportedVdaf", "Task VDAF does not match");
-		return this as unknown as Task<N>;
+		return this as unknown as Task<W>;
 	}
 
-	get info(): Uint8Array {
+	get info(): Uint8Array<ArrayBuffer> {
 		return this.#info.slice();
 	}
-	encodeConfiguration(): Uint8Array {
+	encodeConfiguration(): Uint8Array<ArrayBuffer> {
 		return this.#configuration.slice();
 	}
 
-	/** Validate a timestamp expressed in DAP time-precision units. */
-	validateTime(time: number): void {
-		if (
-			!Number.isSafeInteger(time) ||
-			time < 0 ||
-			(this.#interval &&
-				(BigInt(time) < this.#interval.start ||
-					BigInt(time) >= this.#interval.end))
-		) {
-			throw new DAPError(
-				"InvalidReport",
-				"Report time is outside the task interval",
-			);
-		}
+	/** @internal Whether a time in DAP time-precision units is in the task interval. */
+	inInterval(time: bigint): boolean {
+		return (
+			!this.#interval ||
+			(time >= this.#interval.start && time < this.#interval.end)
+		);
 	}
+}
+
+/** @internal Truncate Unix milliseconds to DAP time-precision units. */
+export function toTime(task: Task, ms: number): bigint {
+	if (!Number.isSafeInteger(ms) || ms < 0)
+		throw new DAPError(
+			"InvalidMessage",
+			"Expected non-negative Unix milliseconds",
+		);
+	return BigInt(ms) / (1000n * BigInt(task.timePrecision));
+}
+
+/** @internal Convert DAP time-precision units to Unix milliseconds. */
+export function toMs(task: Task, time: bigint): number {
+	const ms = time * 1000n * BigInt(task.timePrecision);
+	if (ms > BigInt(Number.MAX_SAFE_INTEGER))
+		throw new DAPError("InvalidMessage", "Time is beyond the supported range");
+	return Number(ms);
 }

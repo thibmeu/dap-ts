@@ -1,27 +1,29 @@
 import { expect, it } from "vitest";
 import {
-	addCountOutputShare,
 	countVerifierMessage,
 	countVerifierShare,
-	helperCountBatchInit,
 	helperCountInit,
-	helperCountJobInit,
-	leaderCountBatchFinish,
-	leaderCountBatchInit,
 	leaderCountFinish,
 	leaderCountInit,
-	leaderCountJobFinish,
-	leaderCountJobInit,
-	openCountInputShare,
-	prepareAggregatorKey,
 } from "../src/aggregator.js";
-import { concat, uint } from "../src/binary.js";
-import { Client } from "../src/client.js";
-import type { DAPError } from "../src/errors.js";
+import { concat, uint, vector } from "../src/binary.js";
 import { createSuite } from "../src/hpke.js";
-import { decodeReport, encodeReport } from "../src/messages.js";
-import { unshardCount } from "../src/prio3-count.js";
-import { Task } from "../src/task.js";
+import {
+	Client,
+	Collector,
+	DAPError,
+	Helper,
+	Leader,
+	problemResponse,
+	type ReportId,
+	Task,
+} from "../src/index.js";
+import {
+	decodeReport,
+	encodeCollectionJobRequest,
+	encodeReport,
+	encodeUploadRequest,
+} from "../src/messages.js";
 import { deterministicRandom, hpke, task, taskOptions } from "./fixtures.js";
 import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 import count0 from "./vectors/Prio3Count_0.json";
@@ -32,17 +34,6 @@ import badMeasurement from "./vectors/Prio3Count_bad_meas_share.json";
 import badWire from "./vectors/Prio3Count_bad_wire_seed.json";
 
 const bytes = (hex: string) => Uint8Array.fromHex(hex);
-
-it("prepares a nonextractable recipient key pair from the published X25519 key", async () => {
-	const prepared = await prepareAggregatorKey({
-		configId: 7,
-		privateKey: bytes(hpkeVector.skRm),
-	});
-	expect(prepared.privateKey.privateKey.extractable).toBe(false);
-	expect(
-		await createSuite().SerializePublicKey(prepared.privateKey.publicKey),
-	).toEqual(bytes(hpkeVector.pkRm));
-});
 
 for (const [name, vector] of Object.entries({ count0, count2 })) {
 	it(`${name}: matches published verifier shares and completes the two roles`, () => {
@@ -130,231 +121,366 @@ it("rejects truncated and non-canonical peer messages", () => {
 	).toThrow();
 });
 
-it("processes an encrypted DAP 19 report through a one-report aggregation job", async () => {
-	const client = new Client(task, {
+const privateKey = bytes(hpkeVector.skRm);
+const verifyKeys = [{ id: 0, key: new Uint8Array(32) }];
+const NOW = 179999;
+const roles = async (options: { maxSkewSeconds?: number } = {}) => ({
+	leader: await Leader.create(task, {
+		hpkeKeys: [{ configId: 7, privateKey }],
+		verifyKeys,
+		clock: () => NOW,
+		...options,
+	}),
+	helper: await Helper.create(task, {
+		hpkeKeys: [{ configId: 8, privateKey }],
+		verifyKeys,
+		clock: () => NOW,
+		...options,
+	}),
+});
+const client = () =>
+	Client.create(task, {
 		hpke,
 		random: deterministicRandom(),
-		clock: () => 179999,
+		clock: () => NOW,
 	});
-	const report = decodeReport(encodeReport(await client.prepareReport(1)));
-	const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
-	const helperKey = { configId: 8, privateKey: bytes(hpkeVector.skRm) };
-	const verifyKey = bytes(count0.verify_key);
-	const leader = await leaderCountJobInit(
-		task,
-		report,
-		leaderKey,
-		3,
-		verifyKey,
+
+it("serves every configured HPKE key and decrypts with each", async () => {
+	const other = await createSuite().GenerateKeyPair(true);
+	const otherPrivate = await createSuite().SerializePrivateKey(
+		other.privateKey,
 	);
-	const helper = await helperCountJobInit(
-		task,
-		leader.request,
-		helperKey,
-		3,
-		verifyKey,
-	);
-	const result = leaderCountJobFinish(
-		leader.state,
-		leader.reportId,
-		helper.response,
-	);
-	expect("outputShare" in result).toBe(true);
-	if (!("outputShare" in result) || !helper.outputShare)
-		throw new Error("Expected output shares");
-	expect(unshardCount([result.outputShare, helper.outputShare])).toBe(1n);
-	expect(
-		await helperCountJobInit(task, leader.request, helperKey, 3, verifyKey),
-	).toEqual(helper);
-	expect(
-		await helperCountJobInit(task, leader.request, helperKey, 4, verifyKey),
-	).toMatchObject({
-		response: Uint8Array.of(...report.metadata.id, 2, 9),
+	const otherPublic = await createSuite().SerializePublicKey(other.publicKey);
+	const leader = await Leader.create(task, {
+		hpkeKeys: [
+			{ configId: 9, privateKey: otherPrivate },
+			{ configId: 7, privateKey },
+		],
+		verifyKeys,
+		clock: () => NOW,
 	});
-	const wrongTaskReport = { ...report, publicShare: Uint8Array.of(0) };
+	expect(leader.hpkeConfigs.configs.map((c) => [c.id, c.publicKey])).toEqual([
+		[9, otherPublic],
+		[7, bytes(hpkeVector.pkRm)],
+	]);
+	const rotated = await Client.create(task, {
+		hpke: { leader: leader.hpkeConfigs, helper: hpke.helper },
+		clock: () => NOW,
+	});
+	const old = await client();
+	const job = await leader.prepare([
+		encodeReport(await rotated.prepareReport(1)),
+		encodeReport(await old.prepareReport(1)),
+	]);
+	expect(job.rejected).toEqual([]);
 	await expect(
-		openCountInputShare(
-			task,
-			"leader",
-			wrongTaskReport.metadata,
-			wrongTaskReport.publicShare,
-			wrongTaskReport.leader,
-			leaderKey,
-		),
-	).rejects.toThrow();
-	await expect(
-		openCountInputShare(
-			task,
-			"leader",
-			report.metadata,
-			report.publicShare,
-			report.leader,
-			helperKey,
-		),
-	).rejects.toThrow();
-	const tampered = leader.request.slice();
-	tampered[tampered.length - 1] ^= 1;
-	const rejected = await helperCountJobInit(
-		task,
-		tampered,
-		helperKey,
-		3,
-		verifyKey,
-	);
-	expect(
-		leaderCountJobFinish(leader.state, leader.reportId, rejected.response),
-	).toEqual({ reportError: 6 });
-	expect(() =>
-		leaderCountJobFinish(leader.state, new Uint8Array(16), helper.response),
-	).toThrow();
+		Leader.create(task, {
+			hpkeKeys: [
+				{ configId: 7, privateKey },
+				{ configId: 7, privateKey },
+			],
+			verifyKeys,
+		}),
+	).rejects.toThrow(DAPError);
 });
 
-it("keeps mixed Count job results in report order", async () => {
-	const client = new Client(task, { hpke, random: deterministicRandom() });
-	const [first, second, third] = await Promise.all(
-		[1, 1, 0].map(async (value) =>
-			decodeReport(encodeReport(await client.prepareReport(value))),
+it("checks uploads and answers in request order", async () => {
+	const { leader } = await roles();
+	const c = await client();
+	const [a, b, d] = await c.prepareReports([1, 0, 1]);
+	const decoded = decodeReport(encodeReport(b!));
+	const unknownKey = encodeReport({
+		...decoded,
+		leader: { ...decoded.leader, configId: 99 },
+	});
+	const future = encodeReport(
+		await c.prepareReport(1, { time: NOW + 3_600_000 }),
+	);
+	const upload = leader.upload(
+		encodeUploadRequest([a!, unknownKey, future, d!, a!]),
+	);
+	expect(upload.reports.map((r) => r.id)).toEqual([a!.id, d!.id]);
+	expect(upload.reports[0]!.time).toBe(a!.time);
+	expect(upload.reports[0]!.report).toEqual(encodeReport(a!));
+	expect(upload.rejected.map((r) => r.error)).toEqual([
+		"hpke-unknown-config-id",
+		"report-too-early",
+		"report-replayed",
+	]);
+	const errors = upload.respond([{ id: d!.id, error: "batch-collected" }]);
+	const id = (report: { id: string }) =>
+		Uint8Array.fromBase64(report.id, {
+			alphabet: "base64url",
+		});
+	expect(errors).toEqual(
+		concat(
+			id(b!),
+			Uint8Array.of(4),
+			new Uint8Array(decodeReport(future).metadata.id),
+			Uint8Array.of(8),
+			id(d!),
+			Uint8Array.of(1),
+			id(a!),
+			Uint8Array.of(2),
 		),
 	);
-	const damaged = {
-		...second!,
-		helper: {
-			...second!.helper,
-			payload: second!.helper.payload.slice(),
-		},
-	};
+	expect(leader.upload(encodeUploadRequest([a!])).respond()).toEqual(
+		new Uint8Array(),
+	);
+	expect(() =>
+		upload.respond([{ id: b!.id, error: "report-replayed" }]),
+	).toThrow();
+	expect(() => leader.upload(new Uint8Array(3))).toThrow(DAPError);
+	const bounded = await Leader.create(
+		Task.create({
+			...taskOptions,
+			extensions: [{ type: 1, data: concat(uint(3, 8), uint(2, 8)) }],
+		}),
+		{ hpkeKeys: [{ configId: 7, privateKey }], verifyKeys, clock: () => NOW },
+	);
+	expect(bounded.upload(encodeUploadRequest([a!])).rejected).toEqual([
+		{ id: a!.id, error: "report-dropped" },
+	]);
+});
+
+it("runs a mixed job and keeps results in report order", async () => {
+	const { leader, helper } = await roles();
+	const c = await client();
+	const [first, second, third, fourth] = (
+		await c.prepareReports([1, 1, 0, 1])
+	).map(encodeReport);
+	const damaged = decodeReport(second!);
 	damaged.helper.payload[0]! ^= 1;
-	const unsupported = {
-		...third!,
+	const noisy = decodeReport(fourth!);
+	const unsupported = encodeReport({
+		...noisy,
 		metadata: {
-			...third!.metadata,
+			...noisy.metadata,
 			publicExtensions: [{ type: 500, data: new Uint8Array() }],
 		},
-	};
-	const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
-	const helperKey = { configId: 8, privateKey: bytes(hpkeVector.skRm) };
-	const verifyKey = bytes(count0.verify_key);
-	const leader = await leaderCountBatchInit(
-		task,
-		[first!, damaged, unsupported],
-		leaderKey,
-		0,
-		verifyKey,
-	);
-	expect(leader.reports.map((report) => report.reportId)).toEqual([
-		first!.metadata.id,
-		second!.metadata.id,
-	]);
-	expect(leader.rejected).toMatchObject([
-		{ reportId: third!.metadata.id, error: { code: "InvalidReport" } },
-	]);
-	const helper = await helperCountBatchInit(
-		task,
-		leader.request,
-		helperKey,
-		0,
-		verifyKey,
-	);
-	expect(helper.reports).toHaveLength(2);
-	expect(helper.reports[0]?.outputShare).toBeDefined();
-	expect(helper.reports[1]?.response).toEqual(
-		Uint8Array.of(...second!.metadata.id, 2, 5),
-	);
-	const finished = leaderCountBatchFinish(leader.reports, helper.response);
-	expect(finished[0]).toHaveProperty("outputShare");
-	expect(finished[1]).toMatchObject({ reportError: 5 });
-	expect(() =>
-		leaderCountBatchFinish(
-			leader.reports,
-			concat(helper.reports[1]!.response, helper.reports[0]!.response),
-		),
-	).toThrow();
-	expect(() =>
-		leaderCountBatchFinish(leader.reports, helper.reports[0]!.response),
-	).toThrow();
-	await expect(
-		leaderCountBatchInit(task, [first!, first!], leaderKey, 0, verifyKey),
-	).rejects.toThrow();
-	const single = await leaderCountJobInit(
-		task,
+	});
+	const job = await leader.prepare([
 		first!,
-		leaderKey,
-		0,
-		verifyKey,
+		encodeReport(damaged),
+		third!,
+		unsupported,
+	]);
+	expect(job.rejected).toMatchObject([{ error: "invalid-message" }]);
+	expect(job.reports).toHaveLength(3);
+	const verified = await helper.verify(job.request!);
+	expect(verified.reports.map((r) => r.error)).toEqual([
+		undefined,
+		"hpke-decrypt-error",
+		undefined,
+	]);
+	const replayed = verified.reports[2]!.id;
+	const results = leader.finish(
+		job.state,
+		verified.seal([{ id: replayed, error: "report-replayed" }]),
 	);
-	await expect(
-		helperCountBatchInit(
-			task,
-			concat(single.request, single.request.subarray(7)),
-			helperKey,
-			0,
-			verifyKey,
-		),
-	).rejects.toThrow();
+	expect(results.map((r) => [r.id, r.error])).toEqual([
+		[job.reports[0]!.id, undefined],
+		[job.reports[1]!.id, "hpke-decrypt-error"],
+		[job.reports[2]!.id, "report-replayed"],
+	]);
+	expect(results[0]!.time).toBe(120000);
+	// A response that does not line up with the job is refused.
+	const response = verified.seal();
+	for (const bad of [
+		response.subarray(0, 40),
+		concat(response, Uint8Array.of(0)),
+	])
+		expect(() => leader.finish(job.state, bad)).toThrow(DAPError);
+	expect(() =>
+		verified.seal([
+			{ id: "AAAAAAAAAAAAAAAAAAAAAA" as ReportId, error: "report-replayed" },
+		]),
+	).toThrow();
+	await expect(leader.prepare([first!, first!])).rejects.toThrow(DAPError);
+	const none = await leader.prepare([unsupported]);
+	expect(none.request).toBeUndefined();
 });
 
-it("adds canonical Count output shares", () => {
-	const one = Uint8Array.of(1, 0, 0, 0, 0, 0, 0, 0);
-	expect(addCountOutputShare(one, one)).toEqual(
-		Uint8Array.of(2, 0, 0, 0, 0, 0, 0, 0),
-	);
-	expect(() => addCountOutputShare(one, new Uint8Array(7))).toThrow();
-});
-
-it("rejects future and out-of-task-interval Count reports before decryption", async () => {
-	const client = new Client(task, {
-		hpke,
-		random: deterministicRandom(),
-		clock: () => 179999,
-	});
-	const report = decodeReport(encodeReport(await client.prepareReport(1)));
-	const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
-	const future = { ...report.metadata, time: 20n };
-	await expect(
-		openCountInputShare(
-			task,
-			"leader",
-			future,
-			report.publicShare,
-			report.leader,
-			leaderKey,
-			179999,
-		),
-	).rejects.toMatchObject({
-		code: "ReportTooEarly",
-	} satisfies Partial<DAPError>);
-	const bounded = Task.create({
-		...taskOptions,
-		extensions: [{ type: 1, data: concat(uint(3, 8), uint(2, 8)) }],
-	});
-	await expect(
-		openCountInputShare(
-			bounded,
-			"leader",
-			report.metadata,
-			report.publicShare,
-			report.leader,
-			leaderKey,
-			179999,
-		),
-	).rejects.toMatchObject({
-		code: "ReportDropped",
-	} satisfies Partial<DAPError>);
-	const invalidExtension = {
-		...report.metadata,
-		publicExtensions: [{ type: 500, data: new Uint8Array() }],
+it("answers job-level Helper failures with DAP problem types", async () => {
+	const { leader, helper } = await roles();
+	const job = await leader.prepare([
+		encodeReport(await (await client()).prepareReport(1)),
+	]);
+	const request = job.request!;
+	const inits = request.subarray(7);
+	const failure = async (body: Uint8Array) => {
+		try {
+			await helper.verify(body);
+		} catch (error) {
+			return (error as DAPError).type;
+		}
 	};
-	await expect(
-		openCountInputShare(
-			task,
-			"leader",
-			invalidExtension,
-			report.publicShare,
-			report.leader,
-			leaderKey,
-			179999,
+	expect(
+		await failure(
+			concat(
+				Uint8Array.of(0),
+				vector(Uint8Array.of(1), 4),
+				vector(new Uint8Array(), 2),
+				inits,
+			),
 		),
-	).rejects.toMatchObject({
-		code: "InvalidReport",
-	} satisfies Partial<DAPError>);
+	).toBe("invalidAggregationParameter");
+	expect(
+		await failure(
+			concat(
+				Uint8Array.of(0),
+				vector(new Uint8Array(), 4),
+				vector(Uint8Array.of(0, 1, 0, 0), 2),
+				inits,
+			),
+		),
+	).toBe("unsupportedExtension");
+	expect(await failure(concat(request, inits))).toBe("invalidMessage");
+	expect(await failure(request.subarray(0, 7))).toBe("invalidMessage");
+	const unknownKey = request.slice();
+	unknownKey[0] = 5;
+	expect((await helper.verify(unknownKey)).reports[0]!.error).toBe(
+		"unknown-verification-key-id",
+	);
+	const problem = problemResponse(
+		new DAPError("InvalidMessage", "Nope", { type: "batchMismatch" }),
+		task.id,
+	);
+	expect(problem.status).toBe(400);
+	expect(problem.headers.get("content-type")).toBe("application/problem+json");
+	expect(await problem.json()).toMatchObject({
+		type: "urn:ietf:params:ppm:dap:error:batchMismatch",
+		taskid: task.id,
+	});
+	const hidden = problemResponse(new Error("database password is hunter2"));
+	expect(hidden.status).toBe(500);
+	expect(await hidden.text()).not.toContain("hunter2");
+});
+
+it("honours the clock and skew allowance", async () => {
+	const c = await client();
+	const report = encodeReport(
+		await c.prepareReport(1, { time: NOW + 1_200_000 }),
+	);
+	const { leader } = await roles();
+	expect((await leader.prepare([report])).rejected).toMatchObject([
+		{ error: "report-too-early" },
+	]);
+	const { leader: lenient } = await roles({ maxSkewSeconds: 1500 });
+	expect((await lenient.prepare([report])).rejected).toEqual([]);
+	await expect(roles({ maxSkewSeconds: -1 })).rejects.toThrow(DAPError);
+});
+
+it("collects merged buckets end to end", async () => {
+	const collectorKeys = await createSuite().GenerateKeyPair(true);
+	const collectorConfig = {
+		id: 23,
+		kemId: 32,
+		kdfId: 1,
+		aeadId: 1,
+		publicKey: await createSuite().SerializePublicKey(collectorKeys.publicKey),
+	};
+	const options = {
+		verifyKeys,
+		clock: () => 10_000_000,
+		collector: collectorConfig,
+	};
+	const leader = await Leader.create(task, {
+		...options,
+		hpkeKeys: [{ configId: 7, privateKey }],
+	});
+	const helper = await Helper.create(task, {
+		...options,
+		hpkeKeys: [{ configId: 8, privateKey }],
+	});
+	const c = await Client.create(task, { hpke });
+	// Reports in minutes 2 and 4 of a three-bucket query; minute 3 is empty.
+	const reports = [
+		...(await c.prepareReports(Array(60).fill(1), { time: 120_000 })),
+		...(await c.prepareReports([...Array(50).fill(1), 0, 0], {
+			time: 240_000,
+		})),
+	].map(encodeReport);
+	const job = await leader.prepare(reports);
+	const verified = await helper.verify(job.request!);
+	const buckets = {
+		leader: new Map<number, Uint8Array>(),
+		helper: new Map<number, Uint8Array>(),
+	};
+	for (const report of verified.reports)
+		buckets.helper.set(
+			report.time,
+			helper.addToBucket(buckets.helper.get(report.time), report as never),
+		);
+	for (const report of leader.finish(job.state, verified.seal()))
+		buckets.leader.set(
+			report.time,
+			leader.addToBucket(buckets.leader.get(report.time), report as never),
+		);
+	expect(leader.bucketReportCount(buckets.leader.get(240_000)!)).toBe(52);
+
+	const collector = await Collector.create(task, {
+		configId: 23,
+		privateKey: await createSuite().SerializePrivateKey(
+			collectorKeys.privateKey,
+		),
+	});
+	const prepared = collector.prepare({ start: 120_000, end: 300_000 });
+	const collection = leader.collection(
+		new Uint8Array(await prepared.request.arrayBuffer()),
+	);
+	expect(collection.interval).toEqual({ start: 120_000, end: 300_000 });
+	const range = (interval: { start: number; end: number }) =>
+		Array.from(
+			{ length: (interval.end - interval.start) / 60_000 },
+			(_, i) => interval.start + i * 60_000,
+		);
+	const merge = (
+		role: typeof leader | typeof helper,
+		map: Map<number, Uint8Array>,
+		interval: { start: number; end: number },
+	) =>
+		role.mergeBuckets(range(interval).flatMap((time) => map.get(time) ?? []));
+	const leaderBucket = merge(leader, buckets.leader, collection.interval);
+	const shareRequest = collection.aggregateShareRequest(leaderBucket);
+	const share = helper.aggregateShare(shareRequest);
+	expect(share.interval).toEqual(collection.interval);
+	// A Helper that saw a different batch refuses with batchMismatch.
+	const helperBucket = merge(helper, buckets.helper, share.interval);
+	await expect(
+		share.finish(
+			helper.addToBucket(helperBucket, verified.reports[0] as never),
+		),
+	).rejects.toMatchObject({ type: "batchMismatch" });
+	const helperShare = await share.finish(helperBucket);
+	const response = await collection.finish(leaderBucket, helperShare);
+	const result = await prepared.process(
+		new Response(response, {
+			headers: {
+				location: "/tasks/x/collection_jobs/y",
+				"content-type": "application/ppm-dap;message=collection-job-resp",
+			},
+		}),
+	);
+	expect(result).toEqual({
+		status: "complete",
+		value: 110n,
+		reportCount: 112,
+		interval: { start: 120_000, end: 300_000 },
+	});
+	// Below the task's minimum batch size, both roles refuse.
+	const small = leader.collection(encodeCollectionJobRequest(2, 1));
+	expect(() => small.aggregateShareRequest(leader.mergeBuckets([]))).toThrow(
+		expect.objectContaining({ type: "invalidBatchSize" }),
+	);
+	await expect(
+		Leader.create(task, {
+			verifyKeys,
+			hpkeKeys: [{ configId: 7, privateKey }],
+		}).then((plain) =>
+			plain
+				.collection(encodeCollectionJobRequest(2, 3))
+				.finish(leaderBucket, helperShare),
+		),
+	).rejects.toThrow("No collector HPKE configuration");
 });

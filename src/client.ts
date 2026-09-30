@@ -1,5 +1,5 @@
 import { base64url, bytes, concat, concatParts, decodeId } from "./binary.js";
-import { DAPError } from "./errors.js";
+import { DAPError, type DAPProblem } from "./errors.js";
 import {
 	type AggregatorHpkeConfigs,
 	createSuite,
@@ -16,45 +16,27 @@ import {
 	encodeReport,
 	type HpkeConfig,
 } from "./messages.js";
-import { shardCountWithRandomness } from "./prio3-count.js";
-import {
-	shardHistogramWithRandomness,
-	validateHistogramMeasurement,
-} from "./prio3-histogram.js";
-import { shardSumWithRandomness, validateSumMeasurement } from "./prio3-sum.js";
 import {
 	type PreparedReport,
 	preparedReport,
+	type ReportError,
 	type ReportId,
 	reportBytes,
+	reportErrors,
 } from "./reports.js";
-import { Task } from "./task.js";
+import { Task, toMs, toTime } from "./task.js";
+import {
+	type Measurement,
+	randomLength,
+	shard,
+	type Vdaf,
+	validateMeasurement,
+} from "./vdaf.js";
 
-export interface DAPRequest {
-	readonly method: "GET" | "POST";
-	readonly url: string;
-	readonly headers: Readonly<Record<string, string>>;
-	readonly body?: Uint8Array;
-}
-export interface DAPResponse {
-	readonly status: number;
-	readonly headers: Readonly<Record<string, string>>;
-	readonly body: Uint8Array;
-}
 export interface ReportRejection {
 	readonly id: ReportId;
-	readonly code:
-		| "batch-collected"
-		| "report-replayed"
-		| "report-dropped"
-		| "hpke-unknown-config-id"
-		| "hpke-decrypt-error"
-		| "vdaf-verify-error"
-		| "invalid-message"
-		| "report-too-early"
-		| "unknown-verification-key-id"
-		| "unsupported-extension"
-		| "unknown";
+	/** "unknown" for a codepoint this package does not know; see `rawCode`. */
+	readonly error: ReportError | "unknown";
 	readonly rawCode: number;
 }
 export interface UploadResult {
@@ -63,8 +45,9 @@ export interface UploadResult {
 	readonly ok: boolean;
 }
 export interface PreparedUpload {
-	readonly request: DAPRequest;
-	process(response: DAPResponse): UploadResult;
+	/** A fresh Request on each read, so a retry can send it again. */
+	readonly request: Request;
+	process(response: Response): Promise<UploadResult>;
 }
 export interface ClientOptions {
 	readonly hpke: AggregatorHpkeConfigs;
@@ -73,7 +56,7 @@ export interface ClientOptions {
 	readonly clock?: () => number;
 }
 export interface PrepareReportOptions {
-	/** Date or Unix milliseconds. */
+	/** Date or Unix milliseconds. Defaults to the client clock. */
 	readonly time?: Date | number;
 	readonly publicExtensions?: readonly Extension[];
 	readonly privateExtensions?: {
@@ -86,32 +69,69 @@ export function resource(base: string, path: string): string {
 	return `${base.endsWith("/") ? base : `${base}/`}${path}`;
 }
 
-export function header(
-	headers: Readonly<Record<string, string>>,
-	name: string,
-): string | undefined {
-	const matches = Object.entries(headers).filter(
-		([key]) => key.toLowerCase() === name,
-	);
-	if (matches.length > 1 || (matches[0] && typeof matches[0][1] !== "string")) {
-		throw new DAPError("InvalidResponse", "Ambiguous response header");
-	}
-	return matches[0]?.[1];
+/**
+ * Build a DAP request that never follows redirects or sends cookies. A
+ * redirect arrives as a non-2xx response and fails the status check;
+ * workerd rejects redirect "error".
+ */
+export function dapRequest(
+	url: string,
+	method: "GET" | "POST",
+	headers: Record<string, string>,
+	body?: Uint8Array,
+): Request {
+	return new Request(url, {
+		method,
+		headers,
+		redirect: "manual",
+		credentials: "omit",
+		...(body ? { body: body.slice() } : {}),
+	});
 }
 
+/** Read a response body, refusing more than limit bytes. */
+export async function readBody(
+	response: Response,
+	limit: number,
+): Promise<Uint8Array> {
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	const reader = response.body?.getReader();
+	if (!reader) return new Uint8Array();
+	try {
+		while (true) {
+			const next = await reader.read();
+			if (next.done) break;
+			size += next.value.length;
+			if (size > limit) {
+				await reader.cancel();
+				throw new DAPError(
+					"InvalidResponse",
+					"Response exceeds the size limit",
+				);
+			}
+			chunks.push(next.value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return concatParts(chunks);
+}
+
+/** Check a DAP media type, accepting parameters in any order and case. */
 export function checkMediaType(
-	headers: Readonly<Record<string, string>>,
+	contentType: string | null | undefined,
 	message: string,
 	version: 18 | 19 = 19,
 ): void {
-	const [type, ...parts] = (header(headers, "content-type") ?? "").split(";");
+	const [type, ...parts] = (contentType ?? "").split(";");
 	const parameters = new Map<string, string>();
 	for (const part of parts) {
 		const match = /^\s*([\w-]+)\s*=\s*(?:"([^"\\]*)"|([^\s";]+))\s*$/.exec(
 			part,
 		);
 		if (!match || parameters.has(match[1]!.toLowerCase()))
-			throw new DAPError("InvalidResponse", "Invalid media type parameters");
+			throw new DAPError("InvalidMessage", "Invalid media type parameters");
 		parameters.set(match[1]!.toLowerCase(), match[2] ?? match[3]!);
 	}
 	if (
@@ -119,55 +139,91 @@ export function checkMediaType(
 		parameters.get("message") !== message ||
 		(parameters.has("version") && parameters.get("version") !== String(version))
 	) {
-		throw new DAPError("InvalidResponse", "Unexpected DAP media type");
+		throw new DAPError("InvalidMessage", "Unexpected DAP media type");
 	}
 }
 
-export function checkStatus(response: DAPResponse): void {
-	if (
-		!Number.isInteger(response.status) ||
-		response.status < 100 ||
-		response.status > 599
-	) {
-		throw new DAPError("InvalidResponse", "Invalid HTTP status");
+/** Check a response's media type, reporting a mismatch as the peer's fault. */
+export function checkResponseType(
+	response: Response,
+	message: string,
+	version: 18 | 19 = 19,
+): void {
+	try {
+		checkMediaType(response.headers.get("content-type"), message, version);
+	} catch (cause) {
+		throw new DAPError("InvalidResponse", "Unexpected DAP media type", {
+			cause,
+		});
 	}
-	if (response.status < 200 || response.status >= 300) {
-		throw new DAPError(
-			"HttpError",
-			`DAP request failed with HTTP ${response.status}`,
+}
+
+const DAP_ERROR_URN = "urn:ietf:params:ppm:dap:error:";
+
+/** Read an RFC 9457 problem detail document from an error body (DAP 19, 3.6). */
+function parseProblem(
+	contentType: string,
+	body: Uint8Array,
+): DAPProblem | undefined {
+	if (!/^application\/problem\+json\s*(?:;|$)/i.test(contentType.trim()))
+		return undefined;
+	let document: unknown;
+	try {
+		document = JSON.parse(
+			new TextDecoder("utf-8", { fatal: true }).decode(body),
 		);
+	} catch {
+		return undefined;
 	}
+	if (!document || typeof document !== "object" || Array.isArray(document))
+		return undefined;
+	const fields = document as Record<string, unknown>;
+	const uri = typeof fields.type === "string" ? fields.type : "about:blank";
+	const text = (name: string) =>
+		typeof fields[name] === "string" ? { [name]: fields[name] } : {};
+	return Object.freeze({
+		type: uri,
+		...(uri.startsWith(DAP_ERROR_URN)
+			? { dapError: uri.slice(DAP_ERROR_URN.length) }
+			: {}),
+		...text("title"),
+		...text("detail"),
+		...(typeof fields.taskid === "string" ? { taskId: fields.taskid } : {}),
+	}) as DAPProblem;
 }
 
-const rejectionCodes: readonly ReportRejection["code"][] = [
-	"unknown",
-	"batch-collected",
-	"report-replayed",
-	"report-dropped",
-	"hpke-unknown-config-id",
-	"hpke-decrypt-error",
-	"vdaf-verify-error",
-	"invalid-message",
-	"report-too-early",
-	"unknown-verification-key-id",
-	"unsupported-extension",
-];
+/** Throw DAPError for a non-2xx response, carrying its problem document. */
+export async function checkStatus(response: Response): Promise<void> {
+	if (response.status >= 200 && response.status < 300) return;
+	let problem: DAPProblem | undefined;
+	try {
+		// A problem document is small; refuse to buffer an oversized body.
+		problem = parseProblem(
+			response.headers.get("content-type") ?? "",
+			await readBody(response, 65536),
+		);
+	} catch {}
+	const reason = problem?.dapError ?? problem?.title;
+	throw new DAPError(
+		"HttpError",
+		`DAP request failed with HTTP ${response.status}${reason ? `: ${reason}` : ""}`,
+		problem ? { problem } : undefined,
+	);
+}
 
-function processUpload(
-	response: DAPResponse,
+async function processUpload(
+	response: Response,
 	ids: readonly ReportId[],
-): UploadResult {
-	checkStatus(response);
-	bytes(response.body);
+): Promise<UploadResult> {
+	await checkStatus(response);
+	const body = await readBody(response, ids.length * 17);
 	const rejected: ReportRejection[] = [];
-	if (response.body.length) {
-		checkMediaType(response.headers, "upload-errors");
-		if (response.body.length > ids.length * 17)
-			throw new DAPError("InvalidResponse", "Too many upload errors");
+	if (body.length) {
+		checkResponseType(response, "upload-errors");
 		const positions = new Map(ids.map((id, i) => [id as string, i]));
 		let previous = -1;
 		try {
-			for (const error of decodeUploadErrors(response.body)) {
+			for (const error of decodeUploadErrors(body)) {
 				const index = positions.get(error.id);
 				if (index === undefined || index <= previous)
 					throw new DAPError(
@@ -179,7 +235,7 @@ function processUpload(
 					Object.freeze({
 						id: ids[index]!,
 						rawCode: error.rawCode,
-						code: rejectionCodes[error.rawCode] ?? "unknown",
+						error: reportErrors[error.rawCode] ?? "unknown",
 					}),
 				);
 			}
@@ -199,18 +255,27 @@ function processUpload(
 	});
 }
 
-export class Client<M> {
-	readonly task: Task<M>;
+export class Client<V extends Vdaf = Vdaf> {
+	readonly task: Task<V>;
 	#hpke: AggregatorHpkeConfigs;
 	#configs: readonly [HpkeConfig, HpkeConfig];
 	#suite: ReturnType<typeof createSuite>;
-	#keys: Promise<CryptoKey[]> | undefined;
+	#keys: readonly CryptoKey[];
 	#random: RandomSource;
 	#customRandom: RandomSource | undefined;
 	#clock: () => number;
 	#binding: string;
 
-	constructor(task: Task<M>, options: ClientOptions) {
+	private constructor(
+		task: Task<V>,
+		options: ClientOptions,
+		keys: readonly CryptoKey[],
+	) {
+		if (!keys)
+			throw new DAPError(
+				"InvalidTask",
+				"Use Client.create() to build a Client",
+			);
 		if (!(task instanceof Task))
 			throw new DAPError("InvalidTask", "Expected a Task");
 		this.task = task;
@@ -227,11 +292,37 @@ export class Client<M> {
 		this.#clock = options.clock ?? Date.now;
 		this.#suite = createSuite(options.random);
 		this.#binding = `${task.id}:${base64url(task.encodeConfiguration())}`;
+		this.#keys = keys;
 		Object.freeze(this);
 	}
 
-	withHpkeConfigs(hpke: AggregatorHpkeConfigs): Client<M> {
-		return new Client(this.task, {
+	/** Select each Aggregator's HPKE configuration and import its public key. */
+	static async create<V extends Vdaf>(
+		task: Task<V>,
+		options: ClientOptions,
+	): Promise<Client<V>> {
+		if (!(task instanceof Task))
+			throw new DAPError("InvalidTask", "Expected a Task");
+		const suite = createSuite(options.random);
+		let keys: CryptoKey[];
+		try {
+			keys = await Promise.all(
+				[options.hpke?.leader, options.hpke?.helper].map((list) =>
+					suite.DeserializePublicKey(selectConfig(list!).publicKey),
+				),
+			);
+		} catch (cause) {
+			if (cause instanceof DAPError) throw cause;
+			throw new DAPError("InvalidHpkeConfig", "Unusable HPKE public key", {
+				cause,
+			});
+		}
+		return new Client(task, options, keys);
+	}
+
+	/** Rebuild this client against freshly retrieved HPKE configurations. */
+	withHpkeConfigs(hpke: AggregatorHpkeConfigs): Promise<Client<V>> {
+		return Client.create(this.task, {
 			hpke,
 			clock: this.#clock,
 			...(this.#customRandom ? { random: this.#customRandom } : {}),
@@ -239,59 +330,28 @@ export class Client<M> {
 	}
 
 	async prepareReport(
-		measurement: M,
+		measurement: Measurement<V>,
 		options: PrepareReportOptions = {},
 	): Promise<PreparedReport> {
-		if (
-			this.task.vdaf.type === "prio3-count" &&
-			measurement !== 0 &&
-			measurement !== 1
-		)
+		try {
+			validateMeasurement(this.task.vdaf, measurement);
+		} catch (cause) {
 			throw new DAPError(
 				"InvalidMeasurement",
-				"Count measurement must be 0 or 1",
+				cause instanceof Error ? cause.message : "Invalid measurement",
+				{ cause },
 			);
-		if (this.task.vdaf.type === "prio3-sum") {
-			try {
-				validateSumMeasurement(
-					measurement as number | bigint,
-					this.task.vdaf.maxMeasurement!,
-				);
-			} catch (cause) {
-				throw new DAPError(
-					"InvalidMeasurement",
-					"Sum measurement is outside its bound",
-					{ cause },
-				);
-			}
-		}
-		if (this.task.vdaf.type === "prio3-histogram") {
-			try {
-				validateHistogramMeasurement(
-					measurement as number,
-					this.task.vdaf.length!,
-				);
-			} catch (cause) {
-				throw new DAPError(
-					"InvalidMeasurement",
-					"Histogram bucket is outside its range",
-					{ cause },
-				);
-			}
 		}
 		const milliseconds =
 			options.time instanceof Date
 				? options.time.getTime()
 				: (options.time ?? this.#clock());
-		if (!Number.isSafeInteger(milliseconds) || milliseconds < 0)
+		const time = toTime(this.task, milliseconds);
+		if (!this.task.inInterval(time))
 			throw new DAPError(
 				"InvalidReport",
-				"Expected non-negative Unix milliseconds",
+				"Report time is outside the task interval",
 			);
-		const time = Number(
-			BigInt(milliseconds) / (1000n * BigInt(this.task.timePrecision)),
-		);
-		this.task.validateTime(time);
 		const copyExtensions = (extensions: readonly Extension[]) =>
 			extensions.map((extension) => ({
 				type: extension.type,
@@ -313,44 +373,21 @@ export class Client<M> {
 				);
 		}
 		const nonce = randomBytes(this.#random, 16);
-		const rand = randomBytes(
-			this.#random,
-			this.task.vdaf.type === "prio3-histogram" ? 128 : 64,
-		);
+		const rand = randomBytes(this.#random, randomLength(this.task.vdaf));
 		const taskId = decodeId(this.task.id, 32);
 		const dapVersion = `dap-${this.task.dapVersion}`;
 		const ctx = concat(new TextEncoder().encode(dapVersion), taskId);
-		let shares: ReturnType<typeof shardCountWithRandomness>;
+		let shares: ReturnType<typeof shard>;
 		try {
-			try {
-				shares =
-					this.task.vdaf.type === "prio3-count"
-						? shardCountWithRandomness(measurement as number, ctx, nonce, rand)
-						: this.task.vdaf.type === "prio3-sum"
-							? shardSumWithRandomness(
-									measurement as number | bigint,
-									this.task.vdaf.maxMeasurement!,
-									ctx,
-									nonce,
-									rand,
-								)
-							: shardHistogramWithRandomness(
-									measurement as number,
-									this.task.vdaf.length!,
-									this.task.vdaf.chunkLength!,
-									ctx,
-									nonce,
-									rand,
-								);
-			} catch (cause) {
-				if (cause instanceof RangeError || cause instanceof TypeError)
-					throw new DAPError("InvalidMeasurement", cause.message, { cause });
-				throw cause;
-			}
+			shares = shard(this.task.vdaf, measurement, ctx, nonce, rand);
+		} catch (cause) {
+			if (cause instanceof RangeError || cause instanceof TypeError)
+				throw new DAPError("InvalidMeasurement", cause.message, { cause });
+			throw cause;
 		} finally {
 			rand.fill(0);
 		}
-		const metadata = { id: nonce, time: BigInt(time), publicExtensions };
+		const metadata = { id: nonce, time, publicExtensions };
 		const aad = encodeInputShareAad(
 			taskId,
 			this.task.encodeConfiguration(),
@@ -362,12 +399,7 @@ export class Client<M> {
 			encodePlaintextInputShare(share, privateExtensions[i]),
 		);
 		try {
-			this.#keys ??= Promise.all(
-				this.#configs.map((config) =>
-					this.#suite.DeserializePublicKey(config.publicKey),
-				),
-			);
-			const keys = await this.#keys;
+			const keys = this.#keys;
 			const results = await Promise.allSettled(
 				plaintexts.map(async (plaintext, i) => {
 					const info = concat(
@@ -391,7 +423,7 @@ export class Client<M> {
 			});
 			return preparedReport(
 				base64url(nonce) as ReportId,
-				time,
+				toMs(this.task, time),
 				this.#binding,
 				encodeReport({
 					metadata,
@@ -413,7 +445,7 @@ export class Client<M> {
 	}
 
 	async prepareReports(
-		measurements: readonly M[],
+		measurements: readonly Measurement<V>[],
 		options: PrepareReportOptions & { readonly concurrency?: number } = {},
 	): Promise<readonly PreparedReport[]> {
 		const concurrency = options.concurrency ?? 4;
@@ -451,19 +483,16 @@ export class Client<M> {
 			throw new DAPError("InvalidReport", "Duplicate report IDs in upload");
 		const body = concatParts(encoded);
 		const url = resource(this.task.leader, `tasks/${this.task.id}/reports`);
-		const headers = Object.freeze({
-			"content-type": "application/ppm-dap;message=upload-req",
-		});
 		return Object.freeze({
-			get request(): DAPRequest {
-				return Object.freeze({
+			get request(): Request {
+				return dapRequest(
 					url,
-					method: "POST" as const,
-					headers,
-					body: body.slice(),
-				});
+					"POST",
+					{ "content-type": "application/ppm-dap;message=upload-req" },
+					body,
+				);
 			},
-			process: (response: DAPResponse) => processUpload(response, ids),
+			process: (response: Response) => processUpload(response, ids),
 		});
 	}
 }

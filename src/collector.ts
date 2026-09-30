@@ -1,10 +1,9 @@
 import { bytes, concat, decodeId } from "./binary.js";
 import {
-	checkMediaType,
+	checkResponseType,
 	checkStatus,
-	type DAPRequest,
-	type DAPResponse,
-	header,
+	dapRequest,
+	readBody,
 	resource,
 } from "./client.js";
 import { DAPError } from "./errors.js";
@@ -14,47 +13,44 @@ import {
 	decodeCollectionJobResponse,
 	encodeCollectionJobRequest,
 } from "./messages.js";
-import { unshardCount } from "./prio3-count.js";
-import { unshardHistogram } from "./prio3-histogram.js";
-import { unshardSum } from "./prio3-sum.js";
-import { Task } from "./task.js";
+import { Task, toMs, toTime } from "./task.js";
+import { type AggregateResult, unshard, type Vdaf } from "./vdaf.js";
 
+/** A batch interval. Both ends must fall on the task's time precision. */
 export interface CollectionQuery {
-	/** DAP time-precision units, not Unix seconds. */
-	readonly start: number | bigint;
-	readonly duration: number | bigint;
+	/** Date or Unix milliseconds, inclusive. */
+	readonly start: Date | number;
+	/** Date or Unix milliseconds, exclusive. */
+	readonly end: Date | number;
 }
 
-/** Persist this object to resume an asynchronous collection job. */
+/** Persist this JSON-safe object to resume an asynchronous collection job. */
 export interface CollectionState {
 	readonly location: string;
-	readonly start: string;
-	readonly duration: string;
+	/** Unix milliseconds. */
+	readonly start: number;
+	readonly end: number;
 }
 
-export type CollectionProgress =
+export type CollectionProgress<V extends Vdaf = Vdaf> =
 	| {
 			readonly status: "pending";
 			readonly state: CollectionState;
+			/** Seconds the Leader asked the Collector to wait, if it said. */
 			readonly retryAfter: number | undefined;
 	  }
-	| ({
+	| {
 			readonly status: "complete";
-			readonly reportCount: bigint;
-			readonly interval: { readonly start: bigint; readonly duration: bigint };
-	  } & (
-			| { readonly count: bigint; readonly sum?: never }
-			| { readonly sum: bigint; readonly count?: never }
-			| {
-					readonly histogram: readonly bigint[];
-					readonly count?: never;
-					readonly sum?: never;
-			  }
-	  ));
+			readonly value: AggregateResult<V>;
+			readonly reportCount: number;
+			/** The smallest interval holding every report, in Unix milliseconds. */
+			readonly interval: { readonly start: number; readonly end: number };
+	  };
 
-export interface PreparedCollection {
-	readonly request: DAPRequest;
-	process(response: DAPResponse): Promise<CollectionProgress>;
+export interface PreparedCollection<V extends Vdaf = Vdaf> {
+	/** A fresh Request on each read. Add authentication before sending it. */
+	readonly request: Request;
+	process(response: Response): Promise<CollectionProgress<V>>;
 }
 
 export interface CollectorOptions {
@@ -62,16 +58,48 @@ export interface CollectorOptions {
 	readonly configId: number;
 	/** Raw X25519 private key bytes. Keep them on the backend. */
 	readonly privateKey: Uint8Array;
+	/** Unix milliseconds, as returned by Date.now(). Used for Retry-After dates. */
+	readonly clock?: () => number;
 }
 
-export class Collector {
-	readonly task: Task<number | bigint>;
+// A collection response holds two ciphertexts of at most one Field128 share
+// per histogram bucket plus fixed framing.
+const MAX_RESPONSE = 2 * (4096 * 16 + 16 + 64) + 64;
+
+export class Collector<V extends Vdaf = Vdaf> {
+	readonly task: Task<V>;
 	#configId: number;
 	#suite = createSuite();
-	#key: Promise<CryptoKeyPair>;
+	#key: CryptoKeyPair;
+	#clock: () => number;
 	#creationUrl: string;
 
-	constructor(task: Task<number | bigint>, options: CollectorOptions) {
+	private constructor(
+		task: Task<V>,
+		options: CollectorOptions,
+		key: CryptoKeyPair,
+	) {
+		if (!key)
+			throw new DAPError(
+				"InvalidTask",
+				"Use Collector.create() to build a Collector",
+			);
+		this.#key = key;
+		this.task = task;
+		this.#configId = options.configId;
+		this.#clock = options.clock ?? Date.now;
+		this.#creationUrl = resource(
+			task.leader,
+			`tasks/${task.id}/collection_jobs`,
+		);
+		Object.freeze(this);
+	}
+
+	/** Import the collector private key and bind the collection job URL. */
+	static async create<V extends Vdaf>(
+		task: Task<V>,
+		options: CollectorOptions,
+	): Promise<Collector<V>> {
 		if (!(task instanceof Task) || task.dapVersion !== 19)
 			throw new DAPError("InvalidTask", "Collector requires a DAP 19 task");
 		if (
@@ -83,63 +111,72 @@ export class Collector {
 				"InvalidHpkeConfig",
 				"Invalid collector HPKE config ID",
 			);
-		this.#key = prepareRecipientKey(bytes(options.privateKey, 32));
-		this.task = task;
-		this.#configId = options.configId;
-		this.#creationUrl = resource(
-			task.leader,
-			`tasks/${task.id}/collection_jobs`,
-		);
-		Object.freeze(this);
+		const { pair } = await prepareRecipientKey(bytes(options.privateKey, 32));
+		return new Collector(task, options, pair);
 	}
 
-	prepare(query: CollectionQuery): PreparedCollection {
-		const body = encodeCollectionJobRequest(query.start, query.duration);
-		const start = BigInt(query.start).toString();
-		const duration = BigInt(query.duration).toString();
+	prepare(query: CollectionQuery): PreparedCollection<V> {
+		const interval = this.#interval(query.start, query.end);
+		const body = this.#request(interval);
+		const url = this.#creationUrl;
 		return {
-			request: {
-				method: "POST",
-				url: this.#creationUrl,
-				headers: {
-					"content-type": "application/ppm-dap;message=collection-job-req",
-				},
-				body: body.slice(),
+			get request() {
+				return dapRequest(
+					url,
+					"POST",
+					{ "content-type": "application/ppm-dap;message=collection-job-req" },
+					body,
+				);
 			},
-			process: (response) => this.#process(response, body, start, duration),
+			process: (response) => this.#process(response, body, interval),
 		};
 	}
 
-	resume(state: CollectionState): PreparedCollection {
-		if (
-			!state ||
-			typeof state !== "object" ||
-			typeof state.start !== "string" ||
-			typeof state.duration !== "string" ||
-			state.start.length > 20 ||
-			state.duration.length > 20 ||
-			!/^(0|[1-9][0-9]*)$/.test(state.start) ||
-			!/^[1-9][0-9]*$/.test(state.duration)
-		)
-			throw new DAPError("InvalidMessage", "Invalid saved collection interval");
-		const body = encodeCollectionJobRequest(
-			BigInt(state.start),
-			BigInt(state.duration),
-		);
+	resume(state: CollectionState): PreparedCollection<V> {
+		if (!state || typeof state !== "object")
+			throw new DAPError("InvalidMessage", "Invalid saved collection state");
+		const interval = this.#interval(state.start, state.end);
+		const body = this.#request(interval);
 		const location = this.#location(state.location);
 		return {
-			request: {
-				method: "GET",
-				url: location,
-				headers: { accept: "application/ppm-dap;message=collection-job-resp" },
+			get request() {
+				return dapRequest(location, "GET", {
+					accept: "application/ppm-dap;message=collection-job-resp",
+				});
 			},
-			process: (response) =>
-				this.#process(response, body, state.start, state.duration, location),
+			process: (response) => this.#process(response, body, interval, location),
 		};
 	}
 
-	#location(value: string): string {
-		if (typeof value !== "string")
+	#interval(
+		start: Date | number,
+		end: Date | number,
+	): { start: number; end: number } {
+		const ms = (value: Date | number) =>
+			value instanceof Date ? value.getTime() : value;
+		const interval = { start: ms(start), end: ms(end) };
+		const unit = this.task.timePrecision * 1000;
+		for (const value of [interval.start, interval.end])
+			if (!Number.isSafeInteger(value) || value < 0 || value % unit)
+				throw new DAPError(
+					"InvalidMessage",
+					`Collection bounds must be multiples of ${unit} ms`,
+				);
+		if (interval.end <= interval.start)
+			throw new DAPError("InvalidMessage", "Collection interval is empty");
+		return interval;
+	}
+
+	#request(interval: { start: number; end: number }): Uint8Array {
+		const start = toTime(this.task, interval.start);
+		return encodeCollectionJobRequest(
+			start,
+			toTime(this.task, interval.end) - start,
+		);
+	}
+
+	#location(value: string | null): string {
+		if (typeof value !== "string" || !value || value.length > 2048)
 			throw new DAPError("InvalidResponse", "Invalid collection job location");
 		let url: URL;
 		try {
@@ -147,78 +184,67 @@ export class Collector {
 		} catch {
 			throw new DAPError("InvalidResponse", "Invalid collection job location");
 		}
-		const base = new URL(this.#creationUrl);
-		const prefix = `${base.pathname}/`;
-		const id = url.pathname.startsWith(prefix)
-			? url.pathname.slice(prefix.length)
-			: "";
+		// DAP 19, 3.2 lets the Leader choose the job identifier and its shape,
+		// so only require that the job stays on the Leader's origin and carries
+		// no credentials or fragment.
 		if (
-			url.origin !== base.origin ||
+			url.origin !== new URL(this.#creationUrl).origin ||
 			url.username ||
 			url.password ||
-			url.search ||
-			url.hash ||
-			!/^[A-Za-z0-9_-]{22}$/.test(id)
+			url.hash
 		)
 			throw new DAPError(
 				"InvalidResponse",
 				"Collection job location is outside the task",
 			);
-		decodeId(id, 16);
 		return url.href;
 	}
 
 	async #process(
-		response: DAPResponse,
+		response: Response,
 		requestBody: Uint8Array,
-		start: string,
-		duration: string,
+		interval: { start: number; end: number },
 		previousLocation?: string,
-	): Promise<CollectionProgress> {
-		checkStatus(response);
-		bytes(response.body);
+	): Promise<CollectionProgress<V>> {
+		await checkStatus(response);
+		const body = await readBody(response, MAX_RESPONSE);
 		const location =
-			previousLocation ??
-			this.#location(header(response.headers, "location") ?? "");
-		if (!response.body.length) {
-			const value = header(response.headers, "retry-after");
+			previousLocation ?? this.#location(response.headers.get("location"));
+		if (!body.length) {
+			const value = response.headers.get("retry-after");
 			let retryAfter: number | undefined;
-			if (value !== undefined) {
+			if (value !== null) {
 				if (/^[0-9]+$/.test(value)) retryAfter = Number(value);
 				else {
 					const date = Date.parse(value);
 					if (!Number.isNaN(date))
-						retryAfter = Math.max(0, Math.ceil((date - Date.now()) / 1000));
+						retryAfter = Math.max(0, Math.ceil((date - this.#clock()) / 1000));
 				}
 				if (retryAfter === undefined || !Number.isSafeInteger(retryAfter))
 					throw new DAPError("InvalidResponse", "Invalid Retry-After header");
 			}
 			return {
 				status: "pending",
-				state: { location, start, duration },
+				state: { location, ...interval },
 				retryAfter,
 			};
 		}
-		checkMediaType(
-			response.headers,
-			"collection-job-resp",
-			this.task.dapVersion,
-		);
+		checkResponseType(response, "collection-job-resp", this.task.dapVersion);
 		let result: CollectionJobResponse;
 		try {
-			result = decodeCollectionJobResponse(response.body);
+			result = decodeCollectionJobResponse(body);
 		} catch (cause) {
 			throw new DAPError("InvalidResponse", "Malformed collection response", {
 				cause,
 			});
 		}
-		const queryStart = BigInt(start);
-		const queryEnd = queryStart + BigInt(duration);
+		const queryStart = toTime(this.task, interval.start);
+		const queryEnd = toTime(this.task, interval.end);
 		if (
 			result.start < queryStart ||
 			result.start + result.duration > queryEnd ||
 			result.reportCount < BigInt(this.task.minBatchSize) ||
-			result.reportCount >= 0xffff_ffff_0000_0001n
+			result.reportCount > BigInt(Number.MAX_SAFE_INTEGER)
 		)
 			throw new DAPError(
 				"InvalidResponse",
@@ -229,7 +255,6 @@ export class Collector {
 			this.task.encodeConfiguration(),
 			requestBody,
 		);
-		const key = await this.#key;
 		const shares: Uint8Array[] = [];
 		for (const [index, ciphertext] of [
 			result.leader,
@@ -249,10 +274,15 @@ export class Collector {
 			);
 			try {
 				shares.push(
-					await this.#suite.Open(key, ciphertext.enc, ciphertext.payload, {
-						info,
-						aad,
-					}),
+					await this.#suite.Open(
+						this.#key,
+						ciphertext.enc,
+						ciphertext.payload,
+						{
+							info,
+							aad,
+						},
+					),
 				);
 			} catch (cause) {
 				throw new DAPError(
@@ -264,46 +294,26 @@ export class Collector {
 		}
 		let value: bigint | bigint[];
 		try {
-			value =
-				this.task.vdaf.type === "prio3-count"
-					? unshardCount(shares as [Uint8Array, Uint8Array])
-					: this.task.vdaf.type === "prio3-sum"
-						? unshardSum(shares as [Uint8Array, Uint8Array])
-						: unshardHistogram(
-								shares as [Uint8Array, Uint8Array],
-								this.task.vdaf.length!,
-							);
+			value = unshard(
+				this.task.vdaf,
+				shares as [Uint8Array, Uint8Array],
+				result.reportCount,
+			);
 		} catch (cause) {
-			throw new DAPError("InvalidResponse", "Malformed aggregate share", {
+			throw new DAPError("InvalidResponse", "Invalid aggregate share", {
 				cause,
 			});
 		}
-		if (Array.isArray(value)) {
-			if (
-				value.some((bucket) => bucket > result.reportCount) ||
-				value.reduce((sum, bucket) => sum + bucket, 0n) !== result.reportCount
-			)
-				throw new DAPError("InvalidResponse", "Invalid histogram aggregate");
-		} else {
-			const bound =
-				this.task.vdaf.type === "prio3-count"
-					? 1n
-					: this.task.vdaf.maxMeasurement!;
-			if ((value as bigint) > result.reportCount * bound)
-				throw new DAPError(
-					"InvalidResponse",
-					"Aggregate exceeds the measurement bound",
-				);
-		}
 		return {
 			status: "complete",
-			...(Array.isArray(value)
-				? { histogram: Object.freeze(value) }
-				: this.task.vdaf.type === "prio3-count"
-					? { count: value as bigint }
-					: { sum: value as bigint }),
-			reportCount: result.reportCount,
-			interval: { start: result.start, duration: result.duration },
+			value: (Array.isArray(value)
+				? Object.freeze(value)
+				: value) as AggregateResult<V>,
+			reportCount: Number(result.reportCount),
+			interval: {
+				start: toMs(this.task, result.start),
+				end: toMs(this.task, result.start + result.duration),
+			},
 		};
 	}
 }

@@ -1,7 +1,9 @@
 import {
 	Client,
 	type ClientOptions,
+	type CollectionProgress,
 	type PreparedReport,
+	type Prio3Histogram,
 	prio3Count,
 	prio3Histogram,
 	prio3Sum,
@@ -19,9 +21,10 @@ export async function check(options: ClientOptions) {
 		batchMode: "time-interval",
 		vdaf: prio3Count(),
 	});
-	const client = new Client(task, options);
+	const client = await Client.create(task, options);
 	await client.prepareReport(1);
-	await client.prepareReport(2); // Valid number type, rejected at runtime.
+	// @ts-expect-error Count measurements are 0 or 1.
+	await client.prepareReport(2);
 	// @ts-expect-error Count measurements are numbers.
 	await client.prepareReport(1n);
 	// @ts-expect-error Count measurements are not strings.
@@ -30,8 +33,8 @@ export async function check(options: ClientOptions) {
 		id: task.id,
 		configuration: task.encodeConfiguration(),
 	}).expect(prio3Count());
-	const narrowed = new Client(decoded, options);
-	const sum = new Client(
+	const narrowed = await Client.create(decoded, options);
+	const sum = await Client.create(
 		Task.create({
 			id: task.id,
 			leader: task.leader,
@@ -45,7 +48,7 @@ export async function check(options: ClientOptions) {
 	);
 	await sum.prepareReport(42n);
 	await sum.prepareReport(42);
-	const histogram = new Client(
+	const histogram = await Client.create(
 		Task.create({
 			id: task.id,
 			leader: task.leader,
@@ -64,6 +67,14 @@ export async function check(options: ClientOptions) {
 	await sum.prepareReport("42");
 	// @ts-expect-error expect() restores the measurement type.
 	await narrowed.prepareReport(true);
+	const progress = {} as CollectionProgress<Prio3Histogram>;
+	if (progress.status === "complete") {
+		const buckets: readonly bigint[] = progress.value;
+		// @ts-expect-error Histogram results are bucket arrays.
+		const total: bigint = progress.value;
+		void buckets;
+		void total;
+	}
 	// @ts-expect-error Reports must be prepared by a client.
 	const report: PreparedReport = { id: "anything", time: 0 };
 	return report;

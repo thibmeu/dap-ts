@@ -1,14 +1,5 @@
 import { transform } from "./field.js";
-import {
-	type ClientVdaf,
-	expand,
-	mod,
-	P,
-	requireBytes,
-	unshardCount,
-} from "./prio3-count.js";
-
-const sumVdafs = new Map<bigint, ClientVdaf<number | bigint>>();
+import { expand, mod, P, requireBytes, unshardCount } from "./prio3-count.js";
 
 function integer(value: number | bigint): bigint {
 	if (typeof value === "bigint") return value;
@@ -17,21 +8,11 @@ function integer(value: number | bigint): bigint {
 	return BigInt(value);
 }
 
-/** Prio3Sum accepts integers from zero through maxMeasurement. */
-export function prio3Sum(
-	maxMeasurement: number | bigint,
-): ClientVdaf<number | bigint> {
+/** Normalize a Prio3Sum bound, which must fit below the Field64 modulus. */
+export function sumBound(maxMeasurement: number | bigint): bigint {
 	const max = integer(maxMeasurement);
 	if (max <= 0n || max >= P) throw new RangeError("Invalid sum bound");
-	let vdaf = sumVdafs.get(max);
-	if (!vdaf) {
-		vdaf = Object.freeze({
-			type: "prio3-sum",
-			maxMeasurement: max,
-		}) as ClientVdaf<number | bigint>;
-		sumVdafs.set(max, vdaf);
-	}
-	return vdaf;
+	return max;
 }
 
 function encodeMeasurement(value: bigint, max: bigint): bigint[] {
@@ -62,8 +43,7 @@ export function shardSumWithRandomness(
 	nonce: Uint8Array,
 	rand: Uint8Array,
 ): { publicShare: Uint8Array; inputShares: [Uint8Array, Uint8Array] } {
-	const max = integer(maxMeasurement);
-	if (max <= 0n || max >= P) throw new RangeError("Invalid sum bound");
+	const max = sumBound(maxMeasurement);
 	const meas = encodeMeasurement(integer(measurement), max);
 	requireBytes(ctx);
 	requireBytes(nonce, 16);

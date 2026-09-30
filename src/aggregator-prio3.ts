@@ -1,5 +1,5 @@
 import { concat } from "./binary.js";
-import { fieldMod, fieldPower } from "./field.js";
+import { fieldMod, fieldPower, rootOfUnity, sizeInverse } from "./field.js";
 import { expand, P, requireBytes, xof } from "./prio3-count.js";
 import { P128 } from "./prio3-histogram.js";
 
@@ -35,7 +35,7 @@ function lagrangeWeights(
 	point: bigint,
 	modulus: bigint,
 ): bigint[] {
-	const root = fieldPower(7n, (modulus - 1n) / BigInt(size), modulus);
+	const root = rootOfUnity(size, modulus);
 	const roots: bigint[] = [];
 	const differences: bigint[] = [];
 	const prefix = [1n];
@@ -54,7 +54,7 @@ function lagrangeWeights(
 	let inverse = fieldPower(prefix[size]!, modulus - 2n, modulus);
 	const scale = fieldMod(
 		(fieldPower(point, BigInt(size), modulus) - 1n) *
-			fieldPower(BigInt(size), modulus - 2n, modulus),
+			sizeInverse(size, modulus),
 		modulus,
 	);
 	const weights = Array<bigint>(size);
@@ -77,7 +77,7 @@ function polynomial(
 
 function gadget(values: bigint[], modulus: bigint): bigint[] {
 	const size = values.length + 1;
-	const root = fieldPower(7n, (modulus - 1n) / BigInt(size), modulus);
+	const root = rootOfUnity(size, modulus);
 	let power = 1n;
 	let weighted = 0n;
 	for (const value of values) {

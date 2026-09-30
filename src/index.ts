@@ -1,7 +1,20 @@
 export type {
+	AggregatedReport,
+	AggregateShareJob,
+	AggregationJob,
+	AggregatorHpkeKey,
+	AggregatorOptions,
+	CollectionJob,
+	Interval,
+	ReportRef,
+	ReportRejectionEntry,
+	Upload,
+	UploadedReport,
+	VerifiedJob,
+	VerifyKey,
+} from "./aggregator.js";
+export type {
 	ClientOptions,
-	DAPRequest,
-	DAPResponse,
 	PreparedUpload,
 	PrepareReportOptions,
 	ReportRejection,
@@ -15,90 +28,50 @@ export type {
 	CollectorOptions,
 	PreparedCollection,
 } from "./collector.js";
-export type Collector = import("./collector.js").Collector;
-export type { DAPErrorCode } from "./errors.js";
-export { DAPError, isDAPError } from "./errors.js";
+export { Collector } from "./collector.js";
+export type { DAPErrorCode, DAPProblem, DAPProblemType } from "./errors.js";
+export { DAPError, isDAPError, problemResponse } from "./errors.js";
 export type { AggregatorHpkeConfigs, RandomSource } from "./hpke.js";
 export { HpkeConfigList } from "./hpke.js";
-export { prio3Count } from "./prio3-count.js";
-export { prio3Histogram } from "./prio3-histogram.js";
-export { prio3Sum } from "./prio3-sum.js";
-export type { PreparedReport, ReportId } from "./reports.js";
+export type { HpkeCiphertext, HpkeConfig, Report } from "./messages.js";
+export type { PreparedReport, ReportError, ReportId } from "./reports.js";
 export type { EncodedTask, TaskOptions } from "./task.js";
 export { Task } from "./task.js";
+export type {
+	AggregateResult,
+	Measurement,
+	Prio3Count,
+	Prio3Histogram,
+	Prio3Sum,
+	Vdaf,
+} from "./vdaf.js";
+export { prio3Count, prio3Histogram, prio3Sum } from "./vdaf.js";
 
-import type { HpkeConfig, Report } from "./messages.js";
+import type {
+	AggregatorOptions,
+	Helper as HelperRole,
+	Leader as LeaderRole,
+} from "./aggregator.js";
 import type { Task } from "./task.js";
+import type { Vdaf } from "./vdaf.js";
 
-export type AggregatorOptions = {
-	readonly hpke: { readonly configId: number; readonly privateKey: Uint8Array };
-	readonly verificationKeyId: number;
-	readonly verifyKey: Uint8Array;
-};
-
+// The aggregator roles load their module lazily so that a reporting-only
+// bundle does not pull in verification.
+export type Leader<V extends Vdaf = Vdaf> = LeaderRole<V>;
+export type Helper<V extends Vdaf = Vdaf> = HelperRole<V>;
 export const Leader = {
-	async create(task: Task<unknown>, options: AggregatorOptions) {
-		const core = await import("./aggregator.js");
-		const key = await core.prepareAggregatorKey(options.hpke);
-		return {
-			prepare: (reports: readonly Report[], nowMs?: number) =>
-				core.leaderPrio3BatchInit(
-					task,
-					reports,
-					key,
-					options.verificationKeyId,
-					options.verifyKey,
-					nowMs,
-				),
-			finish: (
-				reports: Parameters<typeof core.leaderPrio3BatchFinish>[1],
-				response: Uint8Array,
-			) => core.leaderPrio3BatchFinish(task, reports, response),
-			addShare: (current: Uint8Array, next: Uint8Array) =>
-				core.addPrio3OutputShare(task, current, next),
-			encryptShare: (
-				request: Uint8Array,
-				share: Uint8Array,
-				collector: HpkeConfig,
-			) =>
-				core.encryptAggregateShare(task, "leader", request, share, collector),
-		};
+	async create<V extends Vdaf>(
+		task: Task<V>,
+		options: AggregatorOptions,
+	): Promise<Leader<V>> {
+		return (await import("./aggregator.js")).Leader.create(task, options);
 	},
-} as const;
-
+};
 export const Helper = {
-	async create(task: Task<unknown>, options: AggregatorOptions) {
-		const core = await import("./aggregator.js");
-		const key = await core.prepareAggregatorKey(options.hpke);
-		return {
-			verify: (request: Uint8Array, nowMs?: number) =>
-				core.helperPrio3BatchInit(
-					task,
-					request,
-					key,
-					options.verificationKeyId,
-					options.verifyKey,
-					nowMs,
-				),
-			reject: core.encodeCountJobRejection,
-			addShare: (current: Uint8Array, next: Uint8Array) =>
-				core.addPrio3OutputShare(task, current, next),
-			encryptShare: (
-				request: Uint8Array,
-				share: Uint8Array,
-				collector: HpkeConfig,
-			) =>
-				core.encryptAggregateShare(task, "helper", request, share, collector),
-		};
+	async create<V extends Vdaf>(
+		task: Task<V>,
+		options: AggregatorOptions,
+	): Promise<Helper<V>> {
+		return (await import("./aggregator.js")).Helper.create(task, options);
 	},
-} as const;
-
-export const Collector = {
-	async create(
-		task: Task<number | bigint>,
-		options: import("./collector.js").CollectorOptions,
-	) {
-		const { Collector } = await import("./collector.js");
-		return new Collector(task, options);
-	},
-} as const;
+};

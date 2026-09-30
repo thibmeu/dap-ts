@@ -115,16 +115,16 @@ async function completed(
 		helper,
 	);
 	const prepared = options.resumed
-		? collector.resume({ location, start: "10", duration: "2" })
-		: collector.prepare({ start: 10, duration: 2 });
-	return prepared.process({
-		status: 200,
-		headers: {
-			location,
-			"content-type": "application/ppm-dap;message=collection-job-resp",
-		},
-		body: response,
-	});
+		? collector.resume({ location, start: 600000, end: 720000 })
+		: collector.prepare({ start: 600000, end: 720000 });
+	return prepared.process(
+		new Response(response, {
+			headers: {
+				location,
+				"content-type": "application/ppm-dap;message=collection-job-resp",
+			},
+		}),
+	);
 }
 
 it("encodes the DAP 19 time-interval count collection request", () => {
@@ -168,11 +168,11 @@ it("decrypts bounded sum shares and rejects results above the batch bound", asyn
 		configId: 7,
 		privateKey,
 	});
-	const prepared = collector.prepare({ start: 10, duration: 2 });
+	const prepared = collector.prepare({ start: 600000, end: 720000 });
 	const aad = concat(
 		Uint8Array.fromBase64(sumTask.id, { alphabet: "base64url" }),
 		sumTask.encodeConfiguration(),
-		prepared.request.body!,
+		encodeCollectionJobRequest(10, 2),
 	);
 	const seal = async (role: number, value: bigint) => {
 		const share = new Uint8Array(8);
@@ -190,23 +190,25 @@ it("decrypts bounded sum shares and rejects results above the batch bound", asyn
 			vector(ciphertext.ciphertext, 4),
 		);
 	};
-	const response = async (sum: bigint) => ({
-		status: 200,
-		headers: {
-			location: `/tasks/${sumTask.id}/collection_jobs/${jobId}`,
-			"content-type": "application/ppm-dap;message=collection-job-resp",
-		},
-		body: concat(
-			uint(100, 8),
-			uint(10, 8),
-			uint(2, 8),
-			await seal(2, 25n),
-			await seal(3, sum - 25n),
-		),
-	});
+	const response = async (sum: bigint) =>
+		new Response(
+			concat(
+				uint(100, 8),
+				uint(10, 8),
+				uint(2, 8),
+				await seal(2, 25n),
+				await seal(3, sum - 25n),
+			),
+			{
+				headers: {
+					location: `/tasks/${sumTask.id}/collection_jobs/${jobId}`,
+					"content-type": "application/ppm-dap;message=collection-job-resp",
+				},
+			},
+		);
 	await expect(prepared.process(await response(1521n))).resolves.toMatchObject({
 		status: "complete",
-		sum: 1521n,
+		value: 1521n,
 	});
 	await expect(prepared.process(await response(133701n))).rejects.toMatchObject(
 		{ code: "InvalidResponse" },
@@ -224,12 +226,15 @@ it("decrypts histogram shares and checks the bucket total", async () => {
 		vdaf: prio3Histogram(4, 2),
 	});
 	const { suite, pair, privateKey } = await keys();
-	const collector = new Collector(histogramTask, { configId: 7, privateKey });
-	const prepared = collector.prepare({ start: 10, duration: 2 });
+	const collector = await Collector.create(histogramTask, {
+		configId: 7,
+		privateKey,
+	});
+	const prepared = collector.prepare({ start: 600000, end: 720000 });
 	const aad = concat(
 		Uint8Array.fromBase64(histogramTask.id, { alphabet: "base64url" }),
 		histogramTask.encodeConfiguration(),
-		prepared.request.body!,
+		encodeCollectionJobRequest(10, 2),
 	);
 	const seal = async (role: number, buckets: number[]) => {
 		const share = new Uint8Array(16 * buckets.length);
@@ -249,25 +254,27 @@ it("decrypts histogram shares and checks the bucket total", async () => {
 			vector(ciphertext.ciphertext, 4),
 		);
 	};
-	const response = async (helper: number[]) => ({
-		status: 200,
-		headers: {
-			location: `/tasks/${histogramTask.id}/collection_jobs/${jobId}`,
-			"content-type": "application/ppm-dap;message=collection-job-resp",
-		},
-		body: concat(
-			uint(100, 8),
-			uint(10, 8),
-			uint(2, 8),
-			await seal(2, [25, 0, 0, 0]),
-			await seal(3, helper),
-		),
-	});
+	const response = async (helper: number[]) =>
+		new Response(
+			concat(
+				uint(100, 8),
+				uint(10, 8),
+				uint(2, 8),
+				await seal(2, [25, 0, 0, 0]),
+				await seal(3, helper),
+			),
+			{
+				headers: {
+					location: `/tasks/${histogramTask.id}/collection_jobs/${jobId}`,
+					"content-type": "application/ppm-dap;message=collection-job-resp",
+				},
+			},
+		);
 	await expect(
 		prepared.process(await response([0, 50, 25, 0])),
 	).resolves.toMatchObject({
 		status: "complete",
-		histogram: [25n, 50n, 25n, 0n],
+		value: [25n, 50n, 25n, 0n],
 	});
 	await expect(
 		prepared.process(await response([0, 49, 25, 0])),
@@ -276,16 +283,19 @@ it("decrypts histogram shares and checks the bucket total", async () => {
 
 it("decrypts role-bound aggregate shares into an exact bigint count", async () => {
 	const { suite, pair, privateKey } = await keys();
-	const collector = new Collector(task, { configId: 7, privateKey });
+	const collector = await Collector.create(task, { configId: 7, privateKey });
 	privateKey.fill(0);
-	const prepared = collector.prepare({ start: 10, duration: 2 });
+	const prepared = collector.prepare({ start: 600000, end: 720000 });
 	expect(prepared.request.method).toBe("POST");
-	expect(prepared.request.body).toEqual(encodeCollectionJobRequest(10, 2));
-	const pending = await prepared.process({
-		status: 200,
-		headers: { location, "retry-after": "3" },
-		body: new Uint8Array(),
-	});
+	expect(prepared.request.url).toBe(
+		`https://l/tasks/${task.id}/collection_jobs`,
+	);
+	expect(new Uint8Array(await prepared.request.arrayBuffer())).toEqual(
+		encodeCollectionJobRequest(10, 2),
+	);
+	const pending = await prepared.process(
+		new Response(null, { headers: { location, "retry-after": "3" } }),
+	);
 	expect(pending.status).toBe("pending");
 	if (pending.status !== "pending") return;
 	expect(pending.retryAfter).toBe(3);
@@ -294,34 +304,58 @@ it("decrypts role-bound aggregate shares into an exact bigint count", async () =
 		collector,
 		suite,
 		pair.publicKey,
-		prepared.request.body!,
+		encodeCollectionJobRequest(10, 2),
 		{ resumed: true },
 	);
 	expect(result).toEqual({
 		status: "complete",
-		count: 42n,
-		reportCount: 100n,
-		interval: { start: 10n, duration: 2n },
+		value: 42n,
+		reportCount: 100,
+		interval: { start: 600000, end: 720000 },
 	});
 	await expect(
-		completed(collector, suite, pair.publicKey, prepared.request.body!, {
-			swapRoles: true,
-		}),
+		completed(
+			collector,
+			suite,
+			pair.publicKey,
+			encodeCollectionJobRequest(10, 2),
+			{
+				swapRoles: true,
+			},
+		),
 	).rejects.toMatchObject({ code: "DecryptionFailed" });
 	await expect(
-		completed(collector, suite, pair.publicKey, prepared.request.body!, {
-			configId: 8,
-		}),
+		completed(
+			collector,
+			suite,
+			pair.publicKey,
+			encodeCollectionJobRequest(10, 2),
+			{
+				configId: 8,
+			},
+		),
 	).rejects.toMatchObject({ code: "InvalidResponse" });
 	await expect(
-		completed(collector, suite, pair.publicKey, prepared.request.body!, {
-			count: 101,
-		}),
+		completed(
+			collector,
+			suite,
+			pair.publicKey,
+			encodeCollectionJobRequest(10, 2),
+			{
+				count: 101,
+			},
+		),
 	).rejects.toMatchObject({ code: "InvalidResponse" });
 	await expect(
-		completed(collector, suite, pair.publicKey, prepared.request.body!, {
-			start: 12,
-		}),
+		completed(
+			collector,
+			suite,
+			pair.publicKey,
+			encodeCollectionJobRequest(10, 2),
+			{
+				start: 12,
+			},
+		),
 	).rejects.toMatchObject({ code: "InvalidResponse" });
 	await expect(
 		completed(
@@ -331,52 +365,64 @@ it("decrypts role-bound aggregate shares into an exact bigint count", async () =
 			encodeCollectionJobRequest(11, 1),
 		),
 	).rejects.toMatchObject({ code: "DecryptionFailed" });
-	const large = await completed(
-		collector,
-		suite,
-		pair.publicKey,
-		prepared.request.body!,
-		{ reportCount: 9007199254740993n },
-	);
-	expect(large.status === "complete" && large.reportCount).toBe(
-		9007199254740993n,
-	);
+	await expect(
+		completed(
+			collector,
+			suite,
+			pair.publicKey,
+			encodeCollectionJobRequest(10, 2),
+			{
+				reportCount: 9007199254740993n,
+			},
+		),
+	).rejects.toMatchObject({ code: "InvalidResponse" });
 	const other = await keys();
-	const wrongKey = new Collector(task, {
+	const wrongKey = await Collector.create(task, {
 		configId: 7,
 		privateKey: other.privateKey,
 	});
 	await expect(
-		completed(wrongKey, suite, pair.publicKey, prepared.request.body!),
+		completed(
+			wrongKey,
+			suite,
+			pair.publicKey,
+			encodeCollectionJobRequest(10, 2),
+		),
 	).rejects.toMatchObject({ code: "DecryptionFailed" });
 });
 
 it("rejects wrong collection locations and malformed responses", async () => {
 	const { privateKey } = await keys();
-	const collector = new Collector(task, { configId: 7, privateKey });
-	const prepared = collector.prepare({ start: 10, duration: 2 });
-	for (const bad of [
-		"https://evil.example/job",
+	const collector = await Collector.create(task, { configId: 7, privateKey });
+	const prepared = collector.prepare({ start: 600000, end: 720000 });
+	for (const bad of ["https://evil.example/job", `${location}#fragment`, ""]) {
+		await expect(
+			prepared.process(new Response(null, { headers: { location: bad } })),
+		).rejects.toMatchObject({ code: "InvalidResponse" });
+	}
+	// DAP 19, 3.2 lets the Leader choose the job identifier and path.
+	for (const good of [
 		`/tasks/${task.id}/reports/${jobId}`,
 		`${location}?token=x`,
+		"/collection/9e1a2b",
 	]) {
-		await expect(
-			prepared.process({
-				status: 200,
-				headers: { location: bad },
-				body: new Uint8Array(),
-			}),
-		).rejects.toMatchObject({ code: "InvalidResponse" });
+		const progress = await prepared.process(
+			new Response(null, { headers: { location: good } }),
+		);
+		expect(progress.status).toBe("pending");
 	}
 	expect(() =>
 		collector.resume({
 			location: "https://evil.example/job",
-			start: "10",
-			duration: "2",
+			start: 600000,
+			end: 720000,
 		}),
 	).toThrow();
-	expect(() =>
-		collector.resume({ location, start: "010", duration: "2" }),
-	).toThrow();
+	for (const [start, end] of [
+		[600001, 720000],
+		[720000, 720000],
+		[-60000, 0],
+	])
+		expect(() => collector.resume({ location, start, end } as never)).toThrow();
 	expect(() => decodeCollectionJobResponse(new Uint8Array(23))).toThrow();
 });

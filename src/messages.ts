@@ -3,6 +3,7 @@ import {
 	bytes,
 	concat,
 	concatParts,
+	decodeId,
 	Reader,
 	uint,
 	vector,
@@ -11,7 +12,9 @@ import { DAPError } from "./errors.js";
 import {
 	isPreparedReport,
 	type PreparedReport,
+	type ReportError,
 	reportBytes,
+	reportErrorCode,
 } from "./reports.js";
 
 export interface Extension {
@@ -70,7 +73,7 @@ export interface CollectionJobResponse {
 export function encodeCollectionJobRequest(
 	start: number | bigint,
 	duration: number | bigint,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	const encodedStart = uint(start, 8);
 	const encodedDuration = uint(duration, 8);
 	if (
@@ -135,7 +138,7 @@ export function decodeCollectionJobResponse(
 
 export function encodeCollectionJobResponse(
 	value: CollectionJobResponse,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	return concat(
 		uint(value.reportCount, 8),
 		uint(value.start, 8),
@@ -149,7 +152,7 @@ export function encodeAggregateShareRequest(
 	collectionRequest: Uint8Array,
 	reportCount: number | bigint,
 	checksum: Uint8Array,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	const { start, duration } = decodeCollectionJobRequest(collectionRequest);
 	return concat(
 		collectionRequest,
@@ -182,12 +185,25 @@ export function decodeAggregateShareRequest(input: Uint8Array): {
 	const reportCount = reader.u64();
 	const checksum = reader.take(32);
 	reader.end();
-	if (selectedStart !== start || selectedDuration !== duration)
+	// DAP 19, 5.1.2: the selected interval must lie within the query.
+	if (
+		selectedDuration === 0n ||
+		selectedStart < start ||
+		selectedStart + selectedDuration > start + duration
+	)
 		throw new DAPError("InvalidMessage", "Batch selector does not match query");
-	return { collectionRequest, start, duration, reportCount, checksum };
+	return {
+		collectionRequest,
+		start: selectedStart,
+		duration: selectedDuration,
+		reportCount,
+		checksum,
+	};
 }
 
-export function encodeAggregateShare(ciphertext: HpkeCiphertext): Uint8Array {
+export function encodeAggregateShare(
+	ciphertext: HpkeCiphertext,
+): Uint8Array<ArrayBuffer> {
 	return encodeCiphertext(ciphertext);
 }
 
@@ -205,7 +221,7 @@ export function decodeAggregateShare(input: Uint8Array): HpkeCiphertext {
 export function encodeExtensions(
 	extensions: readonly Extension[],
 	sorted = false,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	const seen = new Set<number>();
 	let previous = -1;
 	let size = 0;
@@ -239,7 +255,9 @@ function readExtensions(
 	return result;
 }
 
-export function encodeTaskConfiguration(task: TaskConfiguration): Uint8Array {
+export function encodeTaskConfiguration(
+	task: TaskConfiguration,
+): Uint8Array<ArrayBuffer> {
 	return concat(
 		vector(task.info, 1),
 		vector(task.leader, 2, 1),
@@ -286,7 +304,7 @@ export function decodeTaskConfiguration(
 
 export function encodeHpkeConfigList(
 	configs: readonly HpkeConfig[],
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	if (configs.length > 256)
 		throw new DAPError("InvalidHpkeConfig", "Too many HPKE configurations");
 	const result = vector(
@@ -330,7 +348,9 @@ export function decodeHpkeConfigList(input: Uint8Array): HpkeConfig[] {
 	return configs;
 }
 
-export function encodeReportMetadata(metadata: ReportMetadata): Uint8Array {
+export function encodeReportMetadata(
+	metadata: ReportMetadata,
+): Uint8Array<ArrayBuffer> {
 	return concat(
 		bytes(metadata.id, 16),
 		uint(metadata.time, 8),
@@ -341,7 +361,7 @@ export function encodeReportMetadata(metadata: ReportMetadata): Uint8Array {
 export function encodePlaintextInputShare(
 	payload: Uint8Array,
 	extensions: readonly Extension[] = [],
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	return concat(encodeExtensions(extensions), vector(payload, 4, 1));
 }
 
@@ -350,7 +370,7 @@ export function encodeInputShareAad(
 	configuration: Uint8Array,
 	metadata: ReportMetadata,
 	publicShare: Uint8Array,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	return concat(
 		bytes(taskId, 32),
 		configuration,
@@ -359,7 +379,7 @@ export function encodeInputShareAad(
 	);
 }
 
-function encodeCiphertext(ciphertext: HpkeCiphertext): Uint8Array {
+function encodeCiphertext(ciphertext: HpkeCiphertext): Uint8Array<ArrayBuffer> {
 	return concat(
 		uint(ciphertext.configId, 1),
 		vector(ciphertext.enc, 2, 1),
@@ -367,7 +387,9 @@ function encodeCiphertext(ciphertext: HpkeCiphertext): Uint8Array {
 	);
 }
 
-export function encodeReport(report: Report | PreparedReport): Uint8Array {
+export function encodeReport(
+	report: Report | PreparedReport,
+): Uint8Array<ArrayBuffer> {
 	if (isPreparedReport(report)) return reportBytes(report);
 	return concat(
 		encodeReportMetadata(report.metadata),
@@ -416,7 +438,7 @@ export function decodeUploadRequest(input: Uint8Array): Report[] {
 
 export function encodeUploadRequest(
 	reports: readonly (Report | PreparedReport | Uint8Array)[],
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
 	return concatParts(
 		reports.map((report) =>
 			report instanceof Uint8Array ? report : encodeReport(report),
@@ -437,4 +459,15 @@ export function decodeUploadErrors(
 		result.push({ id, rawCode });
 	}
 	return result;
+}
+
+/** Encode UploadErrors (DAP 19, 4.4.2.2) in the order given. */
+export function encodeUploadErrors(
+	errors: readonly { readonly id: string; readonly error: ReportError }[],
+): Uint8Array<ArrayBuffer> {
+	return concatParts(
+		errors.map(({ id, error }) =>
+			concat(decodeId(id, 16), uint(reportErrorCode(error), 1)),
+		),
+	);
 }

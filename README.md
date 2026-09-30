@@ -1,14 +1,14 @@
 # dap-ts
 
-TypeScript reporting client for the [Distributed Aggregation Protocol (DAP)](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.txt).
-Prepare encrypted measurements for two aggregators and process protocol responses without choosing an HTTP transport.
+TypeScript implementation of the [Distributed Aggregation Protocol (DAP)](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.txt).
+Report encrypted measurements, run the Leader and Helper protocol steps, and collect results, with Web `Request` and `Response` objects and storage left to you.
 
 ## Table of contents
 
 - [Example](#example)
 - [Usage](#usage)
 - [Collection](#collection)
-- [Aggregator primitive](#aggregator-primitive)
+- [Aggregators](#aggregators)
 - [Security considerations](#security-considerations)
 - [License](#license)
 
@@ -24,7 +24,7 @@ const task = Task.create({
   info: "page-views-v1",
   leader: "https://leader.example/",
   helper: "https://helper.example/",
-  timePrecision: 60,
+  timePrecision: 3600,
   minBatchSize: 100,
   batchMode: "time-interval",
   vdaf: prio3Count(),
@@ -34,22 +34,13 @@ const hpke = {
   leader: HpkeConfigList.parse(leaderHpkeConfigBytes),
   helper: HpkeConfigList.parse(helperHpkeConfigBytes),
 };
-const client = new Client(task, { hpke });
+const client = await Client.create(task, { hpke });
 const report = await client.prepareReport(1);
 const upload = client.prepareUpload([report]);
-const response = await fetch(upload.request.url, {
-  method: upload.request.method,
-  headers: upload.request.headers,
-  body: upload.request.body,
-});
-const result = upload.process({
-  status: response.status,
-  headers: Object.fromEntries(response.headers),
-  body: new Uint8Array(await response.arrayBuffer()),
-});
+const result = await upload.process(await fetch(upload.request));
 
 for (const rejection of result.rejected) {
-  console.warn(rejection.id, rejection.code);
+  console.warn(rejection.id, rejection.error);
 }
 ```
 
@@ -64,26 +55,18 @@ aggregation, and Count collection. The browser aggregation checks used a
 restrictive content security policy. Mobile browsers and a deployed Cloudflare
 Worker have not been tested.
 
-- `Task.create()` configures a task; `Task.decode()` reads provisioned configuration bytes.
-- `prepareReport()` accepts `0` or `1` for count tasks. For sums, use `prio3Sum(maxMeasurement)` and report an integer from `0` through that bound. Sum measurements and bounds can be `bigint`. For histograms, use `prio3Histogram(length, chunkLength)` and report a bucket index from `0` through `length - 1`.
-- `prepareUpload()` returns request metadata and a response processor for your own transport.
-- `PreparedUpload.request` contains the request to send; `process()` validates the response and reports each outcome.
-- `result.accepted` and `result.rejected` describe individual outcomes. Request-level protocol failures throw `DAPError`.
+- `Task.create()` configures a task; `Task.decode()` reads provisioned configuration bytes and `task.expect(vdaf)` narrows its type.
+- The VDAF fixes the measurement type. `prio3Count()` takes `0` or `1`. `prio3Sum(maxMeasurement)` takes an integer from `0` through the bound, as a number or `bigint`. `prio3Histogram(length, chunkLength)` takes a bucket index from `0` through `length - 1`; this package supports lengths and chunk lengths from 1 through 4096.
+- All four roles are built the same way: `await Client.create()`, `await Leader.create()`, `await Helper.create()`, `await Collector.create()`. Each imports its key material once.
+- Client and Collector requests are Web `Request` objects, read afresh each time you access `.request`, and `process()` takes the `Response`. Add authentication headers with `request.headers.set()`.
+- Times are Unix milliseconds throughout. Report IDs are URL-safe Base 64 strings. Report errors are names such as `report-replayed`, matching DAP's registry.
+- `result.accepted` and `result.rejected` describe individual outcomes. Request-level protocol failures throw `DAPError`. When a peer returns an RFC 9457 problem document, `error.problem.dapError` holds the registered token, such as `invalidBatchSize`, so a caller can retry or give up without parsing the body.
 
 Supply provisioned or retrieved HPKE lists through `HpkeConfigList.parse()`
-or rotate keys with `client.withHpkeConfigs()`. Reuse prepared reports when
+or rotate keys with `await client.withHpkeConfigs()`. Reuse prepared reports when
 retrying an uncertain network outcome.
 
 Binary codecs live in `dap-ts/messages`. [Sinbad](https://github.com/thibmeu/sinbad) provides Fetch helpers for HPKE retrieval, upload, and collection polling.
-
-For a bounded sum, set `vdaf: prio3Sum(1337)` when creating the task and call
-`client.prepareReport(42)`. Import `prio3Sum` from `dap-ts`. Both aggregators
-must be provisioned with the same bound.
-
-For a fixed histogram, set `vdaf: prio3Histogram(4, 2)` and call
-`client.prepareReport(2)` to report bucket 2. Import `prio3Histogram` from
-`dap-ts`. The length and chunk length must match both aggregators; this package
-supports values from 1 through 4096 for each.
 
 ## Collection
 
@@ -98,66 +81,103 @@ const collector = await Collector.create(task, {
   configId: collectorConfigId,
   privateKey: collectorPrivateKey,
 });
-const prepared = collector.prepare({ start: batchStart, duration: 1 });
-// Send prepared.request with your transport, then pass its status, headers,
-// and Uint8Array body to prepared.process(response).
-const progress = await prepared.process(collectionResponse);
+const day = Date.UTC(2026, 8, 28);
+const prepared = collector.prepare({ start: day, end: day + 86_400_000 });
+const request = prepared.request;
+request.headers.set("authorization", `Bearer ${collectorToken}`);
+const progress = await prepared.process(await fetch(request));
 
-if (progress.status === "complete") console.log(progress.count); // bigint
+if (progress.status === "complete") console.log(progress.value); // bigint
 else saveForLater(progress.state);
 ```
 
-When a job is pending, persist `progress.state` and call `collector.resume(state)`
-to prepare the next request. The collector supports the DAP 19 Prio3Count,
-Prio3Sum, and Prio3Histogram profiles; the Janus DAP 18 upload test does not
-exercise collection. For sum tasks, completed progress has `sum` instead of
-`count`; both are `bigint`. Histogram tasks return `histogram`, an array of
-`bigint` bucket counts.
+Both ends of the interval must fall on the task's time precision. A batch
+spans every bucket in the interval, so one query can cover a day of hourly
+buckets. When a job is pending, persist `progress.state` (plain JSON) and call
+`collector.resume(state)` to prepare the next request. `progress.value` is a
+`bigint` for Count and Sum and an array of `bigint` bucket counts for
+Histogram. The Janus DAP 18 upload test does not exercise collection.
 
-## Aggregator primitive
+## Aggregators
 
-`Leader` and `Helper` support DAP 19 Prio3Count, Prio3Sum, and
-Prio3Histogram jobs with one or more reports. Each server supplies its own
-HPKE private key and the shared VDAF verification key.
+`Leader` and `Helper` implement the DAP 19 protocol steps; the host supplies
+HTTP, authentication, scheduling, and storage. Each role takes every HPKE key
+it accepts, most preferred first, and serves the matching list from
+`role.hpkeConfigs`. Keep a retired key for twice the configuration's cache
+lifetime. The Leader starts jobs with the first verification key and the
+Helper accepts any listed ID.
 
 ```typescript
-import { Helper, Leader } from "dap-ts";
+import { Helper, Leader, problemResponse } from "dap-ts";
 
-const leader = await Leader.create(task, {
-  hpke: leaderHpkeKey, verificationKeyId: 0, verifyKey,
-});
-const helper = await Helper.create(task, {
-  hpke: helperHpkeKey, verificationKeyId: 0, verifyKey,
-});
-const job = await leader.prepare(reports);
-// Store job.request and job.reports before sending the request.
-const verified = await helper.verify(job.request);
-// The Helper host commits accepted shares and caches its exact final response.
-const results = leader.finish(job.reports, verified.response);
-// The Leader host commits accepted shares and caches its exact response.
-if (results[0] && "outputShare" in results[0])
-  bucket.share = leader.addShare(bucket.share, results[0].outputShare);
+const options = {
+  hpkeKeys: [{ configId: 1, privateKey }],
+  verifyKeys: [{ id: 0, key: verifyKey }],
+  collector: collectorHpkeConfig,
+};
+const leader = await Leader.create(task, options);
+const helper = await Helper.create(task, { ...options, hpkeKeys: helperKeys });
+
+// Leader, on upload: store accepted reports, answer with the error list.
+const upload = leader.upload(body);
+const refused = upload.reports.filter(seenBefore).map(({ id }) => ({ id, error: "report-replayed" }));
+store(upload.reports.filter((report) => !seenBefore(report)));
+reply(upload.respond(refused));
+
+// Leader, later: one job over stored reports. Save request and state first.
+const job = await leader.prepare(storedReports.map((r) => r.report));
+if (job.request) {
+  // Helper: verify, commit accepted shares, then seal and cache the response.
+  const verified = await helper.verify(job.request);
+  for (const report of verified.reports)
+    if (report.outputShare)
+      bucket(report.time, (b) => helper.addToBucket(b, report));
+  const response = verified.seal(helperRefused);
+
+  // Leader: finish from saved state and commit each share once.
+  for (const report of leader.finish(job.state, response))
+    if (report.outputShare)
+      bucket(report.time, (b) => leader.addToBucket(b, report));
+}
 ```
 
-`job.reports` contains each report ID, time, and verifier state as bytes. Persist
-it with the exact request before sending the job to the Helper. The Helper host
-must atomically check replay and collected buckets, add each accepted share
-with `helper.addShare()`, and cache its final response bytes before replying.
-Use `helper.reject(reportId, code)` to replace a per-report response when a
-host check fails. The Leader host then finishes from its saved states and
-commits each accepted share once. Return cached bytes on retry, reject a reused
-job ID with different bytes, and keep buckets with pending Leader jobs out of
-collection. Authentication, HTTP, scheduling, and storage belong to the host.
+A batch bucket is one opaque `Uint8Array` per task and report `time`. It
+holds the aggregate share, report count, checksum, and the span of report
+times. `addToBucket(undefined, report)` starts one.
 
-`npm run bench:aggregator` measures the local one-report Count path on Node,
-with raw and prepared keys. It excludes HTTP and storage. Compare deployments
-using the same task, report count, hardware, concurrency, and persistence mode.
+Collection runs on both roles the same way: `leader.collection(body)` or
+`helper.aggregateShare(body)` validates the request and returns its
+`interval`. The host merges that interval's buckets with `mergeBuckets()`,
+then `aggregateShareRequest()` and `finish()` build the messages. The Helper
+fails with `batchMismatch` if its count or checksum differs from the Leader's,
+and both refuse batches below the minimum size with `invalidBatchSize`.
+
+Failures carry the spec's problem type in `error.type`.
+`problemResponse(error, task.id)` turns any error into an RFC 9457 response
+and hides errors this library did not raise.
+
+The host still owns the rules that need storage: check replay and collected
+buckets before a report joins a job, commit shares and cache response bytes
+atomically, return cached bytes on retry, and keep buckets with pending Leader
+jobs out of collection.
+
+`npm run bench:aggregator` measures the local verifier path for one job on
+Node: prepare, verify and seal, finish, and bucket commits. It excludes HTTP
+and storage.
 
 ## Security considerations
 
 This library has not been audited.
 DAP requires independent aggregators and suitable batch policies. It does not
 provide differential privacy or prevent disclosure from very small batches.
+
+DAP protects measurement contents, not the fact that a client reported. The
+Leader still sees each upload's source IP, arrival time, and task ID, and can
+use them to profile clients (DAP 19, Section 8). If reporting itself is
+sensitive, or if a task ID distinguishes what the user did, send reports
+through an anonymizing proxy using Oblivious HTTP (Section 8.4), report on a
+fixed schedule regardless of the measurement, or both. Report timestamps are
+already truncated to the task's time precision.
 
 ## License
 

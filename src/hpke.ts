@@ -37,10 +37,14 @@ export function createSuite(random?: RandomSource): CipherSuite<CryptoKey> {
 	return new CipherSuite(factory, KDF_HKDF_SHA256, AEAD_AES_128_GCM);
 }
 
-/** Supply the recipient public key on runtimes without subtle.getPublicKey(). */
+/**
+ * Import a raw X25519 private key as a nonextractable key pair, with the raw
+ * public key. Supplying the public key keeps decryption working on runtimes
+ * without subtle.getPublicKey().
+ */
 export async function prepareRecipientKey(
 	privateBytes: Uint8Array,
-): Promise<CryptoKeyPair> {
+): Promise<{ pair: CryptoKeyPair; publicKey: Uint8Array }> {
 	const suite = createSuite();
 	const secret = Uint8Array.from(bytes(privateBytes, 32));
 	try {
@@ -48,17 +52,20 @@ export async function prepareRecipientKey(
 		const jwk = await crypto.subtle.exportKey("jwk", temporary);
 		if (jwk.kty !== "OKP" || jwk.crv !== "X25519" || !jwk.x)
 			throw new DAPError("InvalidHpkeConfig", "Invalid X25519 private key");
-		const publicKey = await suite.DeserializePublicKey(
-			bytes(
-				Uint8Array.from(
-					atob(jwk.x.replaceAll("-", "+").replaceAll("_", "/")),
-					(char) => char.charCodeAt(0),
-				),
-				32,
+		const raw = bytes(
+			Uint8Array.from(
+				atob(jwk.x.replaceAll("-", "+").replaceAll("_", "/")),
+				(char) => char.charCodeAt(0),
 			),
+			32,
 		);
-		const privateKey = await suite.DeserializePrivateKey(secret);
-		return { privateKey, publicKey };
+		return {
+			pair: {
+				privateKey: await suite.DeserializePrivateKey(secret),
+				publicKey: await suite.DeserializePublicKey(raw),
+			},
+			publicKey: raw,
+		};
 	} finally {
 		secret.fill(0);
 	}
@@ -77,7 +84,7 @@ export class HpkeConfigList {
 	get configs(): readonly HpkeConfig[] {
 		return decodeHpkeConfigList(this.#encoded);
 	}
-	encode(): Uint8Array {
+	encode(): Uint8Array<ArrayBuffer> {
 		return this.#encoded.slice();
 	}
 }

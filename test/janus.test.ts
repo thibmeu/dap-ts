@@ -96,18 +96,9 @@ it.skipIf(!enabled)(
 			expect(result, result.error).toMatchObject({ status: "success" });
 		}
 
-		const client = new Client(task, { hpke });
+		const client = await Client.create(task, { hpke });
 		const upload = client.prepareUpload([await client.prepareReport(1)]);
-		const response = await localFetch(upload.request.url, {
-			method: upload.request.method,
-			headers: upload.request.headers,
-			body: upload.request.body,
-		});
-		const result = upload.process({
-			status: response.status,
-			headers: Object.fromEntries(response.headers),
-			body: new Uint8Array(await response.arrayBuffer()),
-		});
+		const result = await upload.process(await localFetch(upload.request));
 		expect(result.ok).toBe(true);
 	},
 	90_000,

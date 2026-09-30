@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-	prio3Histogram,
 	shardHistogramWithRandomness,
 	unshardHistogram,
 } from "../src/prio3-histogram.js";
+import { prio3Histogram } from "../src/vdaf.js";
 import histogram0 from "./vectors/Prio3Histogram_0.json";
 import histogram2 from "./vectors/Prio3Histogram_2.json";
 

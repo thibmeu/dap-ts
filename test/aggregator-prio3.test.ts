@@ -178,14 +178,12 @@ it("rejects changed Histogram proof, measurement, blind, and field encoding", ()
 	expect(() => check(nonCanonical)).toThrow();
 });
 
-import { leaderPrio3JobFinish } from "../src/aggregator.js";
 import { concat } from "../src/binary.js";
-import { Client } from "../src/client.js";
-import { Helper, Leader } from "../src/index.js";
-import { decodeReport, encodeReport } from "../src/messages.js";
-import { prio3Histogram, unshardHistogram } from "../src/prio3-histogram.js";
-import { prio3Sum, unshardSum } from "../src/prio3-sum.js";
-import { Task } from "../src/task.js";
+import { Client, Helper, Leader, Task } from "../src/index.js";
+import { encodeReport } from "../src/messages.js";
+import { unshardHistogram } from "../src/prio3-histogram.js";
+import { unshardSum } from "../src/prio3-sum.js";
+import { prio3Histogram, prio3Sum } from "../src/vdaf.js";
 import { deterministicRandom, hpke, taskOptions } from "./fixtures.js";
 import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 
@@ -195,99 +193,67 @@ for (const [name, vdaf, values, result] of [
 ] as const) {
 	it(`${name}: verifies encrypted reports through a mixed DAP 19 batch`, async () => {
 		const task = Task.create({ ...taskOptions, vdaf });
-		const client = new Client(task, { hpke, random: deterministicRandom() });
-		const reports = [];
-		for (const value of values)
-			reports.push(
-				decodeReport(encodeReport(await client.prepareReport(value))),
-			);
-		const third = decodeReport(
-			encodeReport(await client.prepareReport(values[0])),
+		const client = await Client.create(task, {
+			hpke,
+			random: deterministicRandom(),
+		});
+		const reports = (await client.prepareReports([...values, values[0]])).map(
+			encodeReport,
 		);
-		const damaged = {
-			...third,
-			helper: {
-				...third.helper,
-				payload: third.helper.payload.slice(),
-			},
-		};
-		damaged.helper.payload[0]! ^= 1;
-		const leaderKey = { configId: 7, privateKey: bytes(hpkeVector.skRm) };
-		const helperKey = { configId: 8, privateKey: bytes(hpkeVector.skRm) };
-		const verifyKey = bytes(sum0.verify_key);
+		// Damage the Helper's ciphertext in the third report.
+		const damaged = reports[2]!;
+		damaged[damaged.length - 1]! ^= 1;
+		const privateKey = bytes(hpkeVector.skRm);
+		const verifyKeys = [{ id: 0, key: bytes(sum0.verify_key) }];
 		const leader = await Leader.create(task, {
-			hpke: leaderKey,
-			verificationKeyId: 0,
-			verifyKey,
+			hpkeKeys: [{ configId: 7, privateKey }],
+			verifyKeys,
 		});
 		const helper = await Helper.create(task, {
-			hpke: helperKey,
-			verificationKeyId: 0,
-			verifyKey,
+			hpkeKeys: [{ configId: 8, privateKey }],
+			verifyKeys,
 		});
-		const job = await leader.prepare([...reports, damaged]);
-		const verified = await helper.verify(job.request);
-		const finished = leader.finish(job.reports, verified.response);
+		const job = await leader.prepare(reports);
+		const verified = await helper.verify(job.request!);
+		const response = verified.seal();
+		const finished = leader.finish(job.state, response);
 		expect(
 			leader.finish(
-				job.reports,
-				concat(
-					helper.reject(job.reports[0]!.reportId, 2),
-					...verified.reports.slice(1).map((item) => item.response),
-				),
+				job.state,
+				verified.seal([{ id: job.reports[0]!.id, error: "report-replayed" }]),
 			)[0],
-		).toMatchObject({ reportError: 2 });
-		expect(finished.map((item) => item.reportId)).toEqual(
-			job.reports.map((item) => item.reportId),
+		).toMatchObject({ error: "report-replayed" });
+		expect(finished.map((item) => item.id)).toEqual(
+			job.reports.map((item) => item.id),
 		);
-		expect(finished[2]).toMatchObject({ reportError: 5 });
+		expect(finished[2]).toMatchObject({ error: "hpke-decrypt-error" });
+		if (name === "Histogram") {
+			// A changed verifier message breaks joint randomness agreement.
+			const changed = response.slice();
+			changed[16 + 1 + 4]! ^= 1;
+			expect(() => leader.finish(job.state, changed)).toThrow();
+		}
 		expect(() =>
 			leader.finish(
-				job.reports,
-				concat(
-					verified.reports[1]!.response,
-					verified.reports[0]!.response,
-					verified.reports[2]!.response,
-				),
+				job.state,
+				concat(response.subarray(1), response.subarray(0, 1)),
 			),
 		).toThrow();
-		if (name === "Histogram") {
-			const changed = verified.reports[0]!.response.slice();
-			changed[changed.length - 1]! ^= 1;
-			expect(() =>
-				leaderPrio3JobFinish(
-					task,
-					job.reports[0]!.state,
-					job.reports[0]!.reportId,
-					changed,
-				),
-			).toThrow();
-		}
-		const leaderShares = finished.slice(0, 2).map((item) => {
-			if (!("outputShare" in item)) throw new Error("Expected output share");
-			return item.outputShare;
-		});
-		const helperShares = verified.reports.slice(0, 2).map((item) => {
-			if (!item.outputShare) throw new Error("Expected output share");
-			return item.outputShare;
-		});
-		if (name === "Sum") {
-			expect(
-				unshardSum([
-					leader.addShare(leaderShares[0]!, leaderShares[1]!),
-					helper.addShare(helperShares[0]!, helperShares[1]!),
-				]),
-			).toBe(result);
-		} else {
-			expect(
-				unshardHistogram(
-					[
-						leader.addShare(leaderShares[0]!, leaderShares[1]!),
-						helper.addShare(helperShares[0]!, helperShares[1]!),
-					],
-					4,
-				),
-			).toEqual(result);
-		}
+		const share = (
+			role: Leader | Helper,
+			items: readonly { outputShare?: Uint8Array; id: string; time: number }[],
+		) =>
+			role
+				.addToBucket(
+					role.addToBucket(undefined, items[0] as never),
+					items[1] as never,
+				)
+				.subarray(0, name === "Sum" ? 8 : 64);
+		const shares = [
+			share(leader, finished),
+			share(helper, verified.reports),
+		] as [Uint8Array, Uint8Array];
+		if (name === "Sum") expect(unshardSum(shares)).toBe(result);
+		else expect(unshardHistogram(shares, 4)).toEqual(result);
 	});
 }

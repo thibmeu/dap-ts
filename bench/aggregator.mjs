@@ -1,106 +1,109 @@
+import { readFile } from "node:fs/promises";
 import { cpus } from "node:os";
 import { performance } from "node:perf_hooks";
-import { readFile } from "node:fs/promises";
-import { DAPClient, HpkeConfigList, prio3Count, Task } from "../dist/index.js";
 import {
-	leaderCountJobInit,
-	helperCountJobInit,
-	prepareAggregatorKey,
-} from "../dist/aggregator.js";
-import {
-	decodeReport,
-	encodeHpkeConfigList,
-	encodeReport,
-} from "../dist/messages.js";
+	Client,
+	Helper,
+	HpkeConfigList,
+	Leader,
+	prio3Count,
+	prio3Histogram,
+	prio3Sum,
+	Task,
+} from "../dist/index.js";
+import { encodeHpkeConfigList, encodeReport } from "../dist/messages.js";
 
-const hpkeVector = JSON.parse(
+// Measures the local verifier path for one job of `batch` reports: Leader
+// prepare, Helper verify and seal, Leader finish, and committing the shares
+// to a bucket. HTTP and storage are excluded.
+const vector = JSON.parse(
 	await readFile(
 		new URL("../test/vectors/hpke-rfc9180-a1.json", import.meta.url),
 	),
 );
-const task = Task.create({
-	id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
-	leader: "https://leader.example/",
-	helper: "https://helper.example/",
-	timePrecision: 60,
-	minBatchSize: 100,
-	batchMode: "time-interval",
-	vdaf: prio3Count(),
-});
-const config = {
-	id: 7,
+const privateKey = Uint8Array.fromHex(vector.skRm);
+const suite = {
 	kemId: 32,
 	kdfId: 1,
 	aeadId: 1,
-	publicKey: Uint8Array.fromHex(hpkeVector.pkRm),
+	publicKey: Uint8Array.fromHex(vector.pkRm),
 };
 const hpke = {
-	leader: HpkeConfigList.parse(encodeHpkeConfigList([config])),
-	helper: HpkeConfigList.parse(encodeHpkeConfigList([{ ...config, id: 8 }])),
+	leader: HpkeConfigList.parse(encodeHpkeConfigList([{ ...suite, id: 7 }])),
+	helper: HpkeConfigList.parse(encodeHpkeConfigList([{ ...suite, id: 8 }])),
 };
-const client = new DAPClient(task, { hpke });
-const report = decodeReport(encodeReport(await client.prepareReport(1)));
-const leaderKey = {
-	configId: 7,
-	privateKey: Uint8Array.fromHex(hpkeVector.skRm),
-};
-const helperKey = {
-	configId: 8,
-	privateKey: Uint8Array.fromHex(hpkeVector.skRm),
-};
-const preparedLeaderKey = await prepareAggregatorKey(leaderKey);
-const preparedHelperKey = await prepareAggregatorKey(helperKey);
-const verifyKey = new Uint8Array(32);
-const leader = await leaderCountJobInit(task, report, leaderKey, 0, verifyKey);
+const verifyKeys = [{ id: 0, key: new Uint8Array(32) }];
+const batch = Number(process.argv[2] ?? 10);
 
-async function measure(fn) {
-	for (let i = 0; i < 30; i++) await fn();
-	if (global.gc) global.gc();
-	const beforeMemory = process.memoryUsage();
-	const samples = [];
-	for (let i = 0; i < 200; i++) {
-		const start = performance.now();
-		await fn();
-		samples.push(performance.now() - start);
-	}
-	samples.sort((a, b) => a - b);
-	if (global.gc) global.gc();
-	const afterMemory = process.memoryUsage();
+async function measure(fn, samples) {
+	for (let i = 0; i < 5; i++) await fn();
+	const cpu = process.cpuUsage();
+	const start = performance.now();
+	for (let i = 0; i < samples; i++) await fn();
+	const used = process.cpuUsage(cpu);
 	return {
-		p50Ms: samples[100],
-		p95Ms: samples[190],
-		rssAfterMiB: afterMemory.rss / 2 ** 20,
-		retainedHeapDeltaMiB:
-			(afterMemory.heapUsed - beforeMemory.heapUsed) / 2 ** 20,
+		cpuUsPerOp: Math.round((used.user + used.system) / samples),
+		wallMsPerOp: +((performance.now() - start) / samples).toFixed(3),
+	};
+}
+
+const results = {};
+for (const [name, vdaf, measurement] of [
+	["count", prio3Count(), 1],
+	["sum", prio3Sum(1337), 42],
+	["histogram", prio3Histogram(100, 10), 2],
+]) {
+	const task = Task.create({
+		id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
+		leader: "https://leader.example/",
+		helper: "https://helper.example/",
+		timePrecision: 60,
+		minBatchSize: 1,
+		batchMode: "time-interval",
+		vdaf,
+	});
+	const client = await Client.create(task, { hpke });
+	const reports = (
+		await client.prepareReports(Array(batch).fill(measurement))
+	).map(encodeReport);
+	const leader = await Leader.create(task, {
+		hpkeKeys: [{ configId: 7, privateKey }],
+		verifyKeys,
+	});
+	const helper = await Helper.create(task, {
+		hpkeKeys: [{ configId: 8, privateKey }],
+		verifyKeys,
+	});
+	const job = await leader.prepare(reports);
+	const response = (await helper.verify(job.request)).seal();
+	const finished = leader.finish(job.state, response);
+	const samples = name === "histogram" ? 10 : 40;
+	results[name] = {
+		leaderPrepare: await measure(() => leader.prepare(reports), samples),
+		helperVerifySeal: await measure(
+			async () => (await helper.verify(job.request)).seal(),
+			samples,
+		),
+		leaderFinish: await measure(
+			() => leader.finish(job.state, response),
+			samples,
+		),
+		commitBatch: await measure(() => {
+			let bucket;
+			for (const report of finished)
+				bucket = leader.addToBucket(bucket, report);
+		}, samples * 10),
+		bytes: {
+			request: job.request.length,
+			response: response.length,
+			state: job.state.length,
+		},
 	};
 }
 
 console.log(
 	JSON.stringify(
-		{
-			node: process.version,
-			platform: `${process.platform}/${process.arch}`,
-			cpu: cpus()[0]?.model,
-			samples: 200,
-			preparedLeader: await measure(() =>
-				leaderCountJobInit(task, report, preparedLeaderKey, 0, verifyKey),
-			),
-			preparedHelper: await measure(() =>
-				helperCountJobInit(
-					task,
-					leader.request,
-					preparedHelperKey,
-					0,
-					verifyKey,
-				),
-			),
-			leader: await measure(() =>
-				leaderCountJobInit(task, report, leaderKey, 0, verifyKey),
-			),
-			helper: await measure(() =>
-				helperCountJobInit(task, leader.request, helperKey, 0, verifyKey),
-			),
-		},
+		{ node: process.version, cpu: cpus()[0]?.model, batch, results },
 		null,
 		2,
 	),

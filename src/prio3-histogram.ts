@@ -1,15 +1,10 @@
 import { fieldMod, transform } from "./field.js";
-import { type ClientVdaf, expand, requireBytes, xof } from "./prio3-count.js";
+import { expand, requireBytes, xof } from "./prio3-count.js";
 
 // VDAF draft 20, Sections 6.1.4, 7.2, and 7.4.4.
 export const P128 = (1n << 66n) * 4611686018427387897n + 1n;
-const histograms = new Map<string, ClientVdaf<number>>();
-
-/** A one-hot histogram with a fixed number of buckets. */
-export function prio3Histogram(
-	length: number,
-	chunkLength: number,
-): ClientVdaf<number> {
+/** Check the one-hot histogram parameters this package supports. */
+export function checkHistogram(length: number, chunkLength: number): void {
 	if (
 		!Number.isSafeInteger(length) ||
 		length < 1 ||
@@ -21,17 +16,6 @@ export function prio3Histogram(
 		throw new RangeError(
 			"Histogram length or chunk length is outside the supported range",
 		);
-	const key = `${length}:${chunkLength}`;
-	let vdaf = histograms.get(key);
-	if (!vdaf) {
-		vdaf = Object.freeze({
-			type: "prio3-histogram",
-			length,
-			chunkLength,
-		}) as ClientVdaf<number>;
-		histograms.set(key, vdaf);
-	}
-	return vdaf;
 }
 
 export function validateHistogramMeasurement(
@@ -82,7 +66,7 @@ export function shardHistogramWithRandomness(
 	nonce: Uint8Array,
 	rand: Uint8Array,
 ): { publicShare: Uint8Array; inputShares: [Uint8Array, Uint8Array] } {
-	prio3Histogram(length, chunkLength);
+	checkHistogram(length, chunkLength);
 	validateHistogramMeasurement(measurement, length);
 	requireBytes(ctx);
 	requireBytes(nonce, 16);

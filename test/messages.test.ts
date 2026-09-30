@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { DAPError, HpkeConfigList, prio3Count, Task } from "../src/index.js";
+import {
+	DAPError,
+	HpkeConfigList,
+	prio3Count,
+	prio3Histogram,
+	prio3Sum,
+	Task,
+} from "../src/index.js";
 import {
 	decodeHpkeConfigList,
 	decodeReport,
@@ -120,10 +127,12 @@ describe("task configuration", () => {
 			{ type: 1, data: hex("00000000000000020000000000000003") },
 		];
 		const limited = Task.create({ ...taskOptions, extensions });
-		limited.validateTime(2);
-		limited.validateTime(4);
-		expect(() => limited.validateTime(1)).toThrow();
-		expect(() => limited.validateTime(5)).toThrow();
+		expect([1n, 2n, 4n, 5n].map((time) => limited.inInterval(time))).toEqual([
+			false,
+			true,
+			true,
+			false,
+		]);
 		expect(() =>
 			Task.create({
 				...taskOptions,
@@ -197,4 +206,30 @@ it("decodes 17-byte upload failures including future error codes", () => {
 	).toBe(255);
 	expect(() => decodeUploadErrors(new Uint8Array(17))).toThrow();
 	expect(() => decodeUploadErrors(new Uint8Array(16))).toThrow();
+});
+
+it("compares VDAF configurations structurally, not by identity", () => {
+	const options = {
+		id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
+		leader: "https://l/",
+		helper: "https://h/",
+		timePrecision: 60,
+		minBatchSize: 100,
+		batchMode: "time-interval",
+	} as const;
+	const sum = Task.create({ ...options, vdaf: prio3Sum(1337) });
+	// A separately constructed factory result must still match.
+	expect(sum.expect(prio3Sum(1337)).vdaf.maxMeasurement).toBe(1337n);
+	expect(() => sum.expect(prio3Sum(1338))).toThrow();
+	expect(() => sum.expect(prio3Count())).toThrow();
+	const histogram = Task.create({ ...options, vdaf: prio3Histogram(4, 2) });
+	expect(histogram.expect(prio3Histogram(4, 2)).vdaf.length).toBe(4);
+	expect(() => histogram.expect(prio3Histogram(4, 4))).toThrow();
+	// A hand-rolled lookalike is still refused at task creation.
+	expect(() =>
+		Task.create({
+			...options,
+			vdaf: { type: "prio3-sum", maxMeasurement: 0n } as never,
+		}),
+	).toThrow();
 });

@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { P } from "../src/prio3-count.js";
-import {
-	prio3Sum,
-	shardSumWithRandomness,
-	unshardSum,
-} from "../src/prio3-sum.js";
+import { shardSumWithRandomness, unshardSum } from "../src/prio3-sum.js";
+import { prio3Sum } from "../src/vdaf.js";
 import sum0 from "./vectors/Prio3Sum_0.json";
 import sum2 from "./vectors/Prio3Sum_2.json";
 

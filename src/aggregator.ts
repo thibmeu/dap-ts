@@ -1,3 +1,4 @@
+import { sha256 } from "@noble/hashes/sha2.js";
 import {
 	addFieldOutputShare,
 	histogramVerifierMessage,
@@ -5,14 +6,6 @@ import {
 	sumVerifierMessage,
 	sumVerifierShare,
 } from "./aggregator-prio3.js";
-
-export {
-	histogramVerifierMessage,
-	histogramVerifierShare,
-	sumVerifierMessage,
-	sumVerifierShare,
-} from "./aggregator-prio3.js";
-
 import {
 	base64url,
 	bytes,
@@ -24,11 +17,20 @@ import {
 	vector,
 } from "./binary.js";
 import { DAPError } from "./errors.js";
-import { createSuite, prepareRecipientKey } from "./hpke.js";
+import { createSuite, HpkeConfigList, prepareRecipientKey } from "./hpke.js";
 import {
+	decodeAggregateShare,
+	decodeAggregateShareRequest,
 	decodeCollectionJobRequest,
+	decodeReport,
+	decodeUploadRequest,
+	encodeAggregateShare,
+	encodeAggregateShareRequest,
+	encodeCollectionJobResponse,
+	encodeHpkeConfigList,
 	encodeInputShareAad,
-	encodeReportMetadata,
+	encodeReport,
+	encodeUploadErrors,
 	type HpkeCiphertext,
 	type HpkeConfig,
 	type Report,
@@ -36,48 +38,21 @@ import {
 } from "./messages.js";
 import { expand, mod, P, requireBytes } from "./prio3-count.js";
 import { P128 } from "./prio3-histogram.js";
-import { Task } from "./task.js";
+import {
+	type ReportError,
+	type ReportId,
+	reportErrorCode,
+	reportErrors,
+} from "./reports.js";
+import { Task, toMs, toTime } from "./task.js";
+import { shareLength, type Vdaf } from "./vdaf.js";
 
 const HALF = (P + 1n) / 2n;
 const ROOT4 = 281474976710656n;
 const suite = createSuite();
 
-/** Seal a committed aggregate share to the task's collector (DAP 19). */
-export async function encryptAggregateShare(
-	task: Task<unknown>,
-	role: "leader" | "helper",
-	collectionRequest: Uint8Array,
-	share: Uint8Array,
-	collector: HpkeConfig,
-): Promise<HpkeCiphertext> {
-	requirePrio3Task(task);
-	decodeCollectionJobRequest(collectionRequest);
-	if (collector.kemId !== 32 || collector.kdfId !== 1 || collector.aeadId !== 1)
-		throw new DAPError(
-			"UnsupportedCipherSuite",
-			"Unsupported collector HPKE suite",
-		);
-	uint(collector.id, 1);
-	const publicKey = await suite.DeserializePublicKey(
-		bytes(collector.publicKey, 32),
-	);
-	const sealed = await suite.Seal(publicKey, bytes(share), {
-		info: concat(
-			new TextEncoder().encode("dap-19 aggregate share"),
-			Uint8Array.of(role === "leader" ? 2 : 3, 0),
-		),
-		aad: concat(
-			decodeId(task.id, 32),
-			task.encodeConfiguration(),
-			collectionRequest,
-		),
-	});
-	return {
-		configId: collector.id,
-		enc: sealed.encapsulatedSecret,
-		payload: sealed.ciphertext,
-	};
-}
+/** Seconds a report timestamp may lead an Aggregator's clock (DAP 19, 4.5.3.4). */
+const DEFAULT_MAX_SKEW_SECONDS = 300;
 
 function elements(input: Uint8Array, length: number): bigint[] {
 	requireBytes(input, length * 8);
@@ -223,184 +198,905 @@ export function leaderCountFinish(
 	return encoded(outputShare);
 }
 
-export interface AggregatorKey {
-	readonly configId: number;
-	readonly privateKey: Uint8Array | CryptoKey | CryptoKeyPair;
+/** A report the aggregation step rejected, with its DAP report error. */
+class Rejection extends Error {
+	readonly error: ReportError;
+	constructor(error: ReportError) {
+		super(error);
+		this.error = error;
+	}
 }
 
-/** Encode a per-report DAP rejection after a host replay or collected-bucket check. */
-export function encodeCountJobRejection(
-	reportId: Uint8Array,
-	code: number,
-): Uint8Array {
-	if (!Number.isInteger(code) || code < 1 || code > 10)
-		throw new DAPError("InvalidMessage", "Invalid report error");
-	return concat(bytes(reportId, 16), uint(2, 1), uint(code, 1));
-}
-
-/** Deserialize once at service startup to avoid repeating X25519 key setup per report. */
-export async function prepareAggregatorKey(key: {
-	readonly configId: number;
-	readonly privateKey: Uint8Array;
-}): Promise<{ configId: number; privateKey: CryptoKeyPair }> {
-	uint(key.configId, 1);
-	return {
-		configId: key.configId,
-		privateKey: await prepareRecipientKey(key.privateKey),
-	};
-}
-
-function shareLength(task: Task<unknown>, role: "leader" | "helper"): number {
-	if (role === "helper") return task.vdaf.type === "prio3-histogram" ? 64 : 32;
-	if (task.vdaf.type === "prio3-count") return 48;
-	if (task.vdaf.type === "prio3-sum") {
-		const bits = task.vdaf.maxMeasurement!.toString(2).length;
+function inputShareLength(vdaf: Vdaf, role: "leader" | "helper"): number {
+	if (role === "helper") return vdaf.type === "prio3-histogram" ? 64 : 32;
+	if (vdaf.type === "prio3-count") return 48;
+	if (vdaf.type === "prio3-sum") {
+		const bits = vdaf.maxMeasurement.toString(2).length;
 		let p = 1;
 		while (p <= bits) p *= 2;
 		return 8 * (bits + 2 * p);
 	}
-	const { length, chunkLength } = task.vdaf;
-	const calls = Math.ceil(length! / chunkLength!);
+	const calls = Math.ceil(vdaf.length / vdaf.chunkLength);
 	let p = 1;
 	while (p <= calls) p *= 2;
-	return 16 * (length! + 2 * chunkLength! + 2 * p - 1) + 32;
+	return 16 * (vdaf.length + 2 * vdaf.chunkLength + 2 * p - 1) + 32;
 }
 
-function requirePrio3Task(task: Task<unknown>): void {
-	if (
-		!(task instanceof Task) ||
-		task.dapVersion !== 19 ||
-		!["prio3-count", "prio3-sum", "prio3-histogram"].includes(task.vdaf.type)
-	)
-		throw new DAPError("InvalidTask", "Expected a DAP 19 Prio3 task");
+/** The Leader's input share must hold canonical field elements. */
+function checkLeaderShare(vdaf: Vdaf, share: Uint8Array): void {
+	if (vdaf.type === "prio3-count") elements(share, 6);
+	else if (vdaf.type === "prio3-sum") {
+		for (let offset = 0; offset < share.length; offset += 8)
+			elements(share.subarray(offset, offset + 8), 1);
+	} else {
+		const view = new DataView(share.buffer, share.byteOffset, share.byteLength);
+		for (let offset = 0; offset < share.length - 32; offset += 16) {
+			const value =
+				view.getBigUint64(offset, true) |
+				(view.getBigUint64(offset + 8, true) << 64n);
+			if (value >= P128) throw new RangeError("Non-canonical Field128 element");
+		}
+	}
 }
 
-/** Decrypt and validate one DAP 19 Prio3 input share. */
-export async function openPrio3InputShare(
-	task: Task<unknown>,
-	role: "leader" | "helper",
-	metadata: ReportMetadata,
-	publicShare: Uint8Array,
-	ciphertext: HpkeCiphertext,
-	key: AggregatorKey,
-	nowMs = Date.now(),
-): Promise<Uint8Array> {
-	requirePrio3Task(task);
-	if (ciphertext.configId !== key.configId)
-		throw new DAPError("InvalidHpkeConfig", "Unknown HPKE config ID");
-	if (key.privateKey instanceof Uint8Array) bytes(key.privateKey, 32);
-	bytes(metadata.id, 16);
-	bytes(publicShare, task.vdaf.type === "prio3-histogram" ? 64 : 0);
-	if (metadata.publicExtensions.length)
-		throw new DAPError("InvalidReport", "Unsupported report extension");
-	if (metadata.time > BigInt(Number.MAX_SAFE_INTEGER))
-		throw new DAPError("InvalidReport", "Invalid report time");
-	if (!Number.isSafeInteger(nowMs) || nowMs < 0)
-		throw new DAPError("InvalidMessage", "Invalid current time");
-	if (
-		metadata.time * BigInt(task.timePrecision) >
-		BigInt(Math.floor(nowMs / 1000)) + 300n
-	)
-		throw new DAPError(
-			"ReportTooEarly",
-			"Report time is too far in the future",
-		);
-	try {
-		task.validateTime(Number(metadata.time));
-	} catch (cause) {
-		throw new DAPError("ReportDropped", "Report is outside the task interval", {
-			cause,
-		});
-	}
-	const taskId = decodeId(task.id, 32);
-	const aad = encodeInputShareAad(
-		taskId,
-		task.encodeConfiguration(),
-		metadata,
-		publicShare,
+export interface AggregatorHpkeKey {
+	readonly configId: number;
+	/** Raw X25519 private key bytes. */
+	readonly privateKey: Uint8Array;
+}
+export interface VerifyKey {
+	readonly id: number;
+	/** The 32-byte VDAF verification key shared by both Aggregators. */
+	readonly key: Uint8Array;
+}
+export interface AggregatorOptions {
+	/**
+	 * Every HPKE key this Aggregator accepts, most preferred first. Keep
+	 * retired keys here for twice the configuration's cache lifetime
+	 * (DAP 19, 4.4.1).
+	 */
+	readonly hpkeKeys: readonly AggregatorHpkeKey[];
+	/** Verification keys by ID. The Leader starts new jobs with the first. */
+	readonly verifyKeys: readonly VerifyKey[];
+	/** The task's collector HPKE configuration, needed to answer collections. */
+	readonly collector?: HpkeConfig;
+	/** Seconds a report timestamp may lead the clock. Defaults to 300. */
+	readonly maxSkewSeconds?: number;
+	/** Unix milliseconds, as returned by Date.now(). */
+	readonly clock?: () => number;
+}
+
+/** A time interval in Unix milliseconds, start inclusive and end exclusive. */
+export interface Interval {
+	readonly start: number;
+	readonly end: number;
+}
+
+export interface ReportRef {
+	readonly id: ReportId;
+	/** Unix milliseconds, truncated to the task's time precision. It names the report's batch bucket. */
+	readonly time: number;
+}
+export interface ReportRejectionEntry {
+	readonly id: ReportId;
+	readonly error: ReportError;
+}
+/** One report's outcome. Commit `outputShare` to the bucket for `time`. */
+export type AggregatedReport = ReportRef &
+	(
+		| { readonly outputShare: Uint8Array; readonly error?: never }
+		| { readonly error: ReportError; readonly outputShare?: never }
 	);
-	const info = concat(
-		new TextEncoder().encode("dap-19 input share"),
-		Uint8Array.of(1, role === "leader" ? 2 : 3),
-	);
-	let plaintext: Uint8Array;
-	try {
-		const privateKey =
-			key.privateKey instanceof Uint8Array
-				? await prepareRecipientKey(key.privateKey)
-				: key.privateKey;
-		plaintext = await suite.Open(
-			privateKey,
-			ciphertext.enc,
-			ciphertext.payload,
-			{ info, aad },
+
+export interface UploadedReport extends ReportRef {
+	/** The encoded report to store until it joins an aggregation job. */
+	readonly report: Uint8Array<ArrayBuffer>;
+}
+export interface Upload {
+	/** Reports that passed the upload checks. */
+	readonly reports: readonly UploadedReport[];
+	/** Reports the upload checks rejected. `respond()` includes them. */
+	readonly rejected: readonly ReportRejectionEntry[];
+	/**
+	 * Build the UploadErrors body in request order, adding the host's own
+	 * rejections, such as report-replayed or batch-collected. An empty body
+	 * means every report was accepted.
+	 */
+	respond(rejected?: readonly ReportRejectionEntry[]): Uint8Array<ArrayBuffer>;
+}
+export interface AggregationJob {
+	/** AggregationJobInitReq bytes, or undefined when no report survived. */
+	readonly request: Uint8Array<ArrayBuffer> | undefined;
+	/** Leader verification state. Persist with `request` before sending it. */
+	readonly state: Uint8Array<ArrayBuffer>;
+	readonly reports: readonly ReportRef[];
+	/** Rejected before the job was built, so absent from `request`. */
+	readonly rejected: readonly (ReportRef & { readonly error: ReportError })[];
+}
+export interface VerifiedJob {
+	readonly reports: readonly AggregatedReport[];
+	/**
+	 * Build the AggregationJobResp body once the host has committed the
+	 * accepted output shares. Pass the reports the host refused, such as
+	 * report-replayed or batch-collected.
+	 */
+	seal(rejected?: readonly ReportRejectionEntry[]): Uint8Array<ArrayBuffer>;
+}
+export interface CollectionJob {
+	readonly interval: Interval;
+	/** The AggregateShareReq body for the merged bucket of `interval`. */
+	aggregateShareRequest(bucket: Uint8Array): Uint8Array<ArrayBuffer>;
+	/** The CollectionJobResp body, given the Helper's AggregateShare body. */
+	finish(
+		bucket: Uint8Array,
+		helperResponse: Uint8Array,
+	): Promise<Uint8Array<ArrayBuffer>>;
+}
+export interface AggregateShareJob {
+	readonly interval: Interval;
+	/** Check the merged bucket against the Leader's and seal the AggregateShare body. */
+	finish(bucket: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
+}
+
+// A batch bucket (DAP 19, 4.5.4.3) is stored as one opaque value:
+// aggregate share || report count (u64) || checksum (32) || first and last
+// report time (u64 each), so a merged bucket also yields the collected interval.
+const NO_TIME = 0xffff_ffff_ffff_ffffn;
+
+interface Bucket {
+	share: Uint8Array;
+	count: bigint;
+	checksum: Uint8Array;
+	first: bigint;
+	last: bigint;
+}
+
+abstract class Aggregator<V extends Vdaf> {
+	readonly task: Task<V>;
+	/** Serve this list at `{aggregator}/hpke_config`. */
+	readonly hpkeConfigs: HpkeConfigList;
+	#keys: ReadonlyMap<number, CryptoKeyPair>;
+	#verifyKeys: ReadonlyMap<number, Uint8Array>;
+	#firstVerifyKey: number;
+	#collector: HpkeConfig | undefined;
+	#maxSkew: number;
+	#clock: () => number;
+	#role: "leader" | "helper";
+
+	protected constructor(
+		role: "leader" | "helper",
+		task: Task<V>,
+		options: AggregatorOptions,
+		keys: ReadonlyMap<number, CryptoKeyPair>,
+		hpkeConfigs: HpkeConfigList,
+	) {
+		this.#role = role;
+		this.task = task;
+		this.#keys = keys;
+		this.hpkeConfigs = hpkeConfigs;
+		this.#verifyKeys = new Map(
+			options.verifyKeys.map(({ id, key }) => [id, bytes(key, 32).slice()]),
 		);
-	} catch (cause) {
-		throw new DAPError("DecryptionFailed", "Input share decryption failed", {
-			cause,
-		});
+		this.#firstVerifyKey = options.verifyKeys[0]!.id;
+		this.#collector = options.collector;
+		this.#maxSkew = options.maxSkewSeconds ?? DEFAULT_MAX_SKEW_SECONDS;
+		this.#clock = options.clock ?? Date.now;
 	}
-	const reader = new Reader(plaintext);
-	if (reader.vector(2).length)
-		throw new DAPError("InvalidReport", "Unsupported private extension");
-	const share = reader.vector(4, 1);
-	reader.end();
-	try {
-		bytes(share, shareLength(task, role));
-		if (role === "leader") {
-			if (task.vdaf.type === "prio3-count") elements(share, 6);
-			else if (task.vdaf.type === "prio3-sum") {
-				for (let offset = 0; offset < share.length; offset += 8)
-					elements(share.subarray(offset, offset + 8), 1);
-			} else {
-				const view = new DataView(
-					share.buffer,
-					share.byteOffset,
-					share.byteLength,
+
+	/** Check options and import each HPKE key once. */
+	protected static async load(
+		task: Task,
+		options: AggregatorOptions,
+	): Promise<{ keys: Map<number, CryptoKeyPair>; configs: HpkeConfigList }> {
+		if (!(task instanceof Task) || task.dapVersion !== 19)
+			throw new DAPError("InvalidTask", "Expected a DAP 19 task");
+		const ids = (list: readonly { readonly id: number }[] | undefined) => {
+			if (!Array.isArray(list) || !list.length)
+				throw new DAPError("InvalidHpkeConfig", "Expected at least one key");
+			for (const { id } of list) uint(id, 1);
+			if (new Set(list.map(({ id }) => id)).size !== list.length)
+				throw new DAPError("InvalidHpkeConfig", "Duplicate key ID");
+		};
+		ids(options.hpkeKeys?.map(({ configId }) => ({ id: configId })));
+		ids(options.verifyKeys);
+		for (const { key } of options.verifyKeys) bytes(key, 32);
+		const skew = options.maxSkewSeconds ?? DEFAULT_MAX_SKEW_SECONDS;
+		if (!Number.isSafeInteger(skew) || skew < 0)
+			throw new DAPError("InvalidMessage", "Invalid clock skew allowance");
+		const collector = options.collector;
+		if (
+			collector &&
+			(collector.kemId !== 32 ||
+				collector.kdfId !== 1 ||
+				collector.aeadId !== 1 ||
+				bytes(collector.publicKey).length !== 32)
+		)
+			throw new DAPError(
+				"UnsupportedCipherSuite",
+				"Unsupported collector HPKE configuration",
+			);
+		if (collector) uint(collector.id, 1);
+		const keys = new Map<number, CryptoKeyPair>();
+		const configs: HpkeConfig[] = [];
+		for (const { configId, privateKey } of options.hpkeKeys) {
+			const { pair, publicKey } = await prepareRecipientKey(privateKey);
+			keys.set(configId, pair);
+			configs.push({ id: configId, kemId: 32, kdfId: 1, aeadId: 1, publicKey });
+		}
+		return {
+			keys,
+			configs: HpkeConfigList.parse(encodeHpkeConfigList(configs)),
+		};
+	}
+
+	/** Commit one output share to a batch bucket. Pass undefined to start one. */
+	addToBucket(
+		bucket: Uint8Array | undefined,
+		report: ReportRef & { readonly outputShare: Uint8Array },
+	): Uint8Array<ArrayBuffer> {
+		// Patch the fields in place: this runs once per committed report.
+		const length = shareLength(this.task.vdaf);
+		const out = bucket
+			? bytes(bucket, length + 56).slice()
+			: this.#writeBucket(this.#readBucket(undefined));
+		const view = new DataView(out.buffer);
+		const time = toTime(this.task, report.time);
+		const digest = sha256(decodeId(report.id, 16));
+		out.set(
+			addFieldOutputShare(
+				out.subarray(0, length),
+				bytes(report.outputShare, length),
+				this.task.vdaf.type === "prio3-histogram" ? 16 : 8,
+			),
+		);
+		view.setBigUint64(length, view.getBigUint64(length) + 1n);
+		for (let i = 0; i < 32; i++) out[length + 8 + i]! ^= digest[i]!;
+		if (time < view.getBigUint64(length + 40))
+			view.setBigUint64(length + 40, time);
+		if (time > view.getBigUint64(length + 48))
+			view.setBigUint64(length + 48, time);
+		return out;
+	}
+
+	/** Combine the buckets of one batch (DAP 19, 4.6.4). */
+	mergeBuckets(buckets: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
+		let result = this.#readBucket(undefined);
+		for (const encoded of buckets) {
+			const next = this.#readBucket(encoded);
+			result = {
+				share: addFieldOutputShare(
+					result.share,
+					next.share,
+					this.task.vdaf.type === "prio3-histogram" ? 16 : 8,
+				),
+				count: result.count + next.count,
+				checksum: result.checksum.map((byte, i) => byte ^ next.checksum[i]!),
+				first: next.first < result.first ? next.first : result.first,
+				last: next.last > result.last ? next.last : result.last,
+			};
+		}
+		return this.#writeBucket(result);
+	}
+
+	bucketReportCount(bucket: Uint8Array): number {
+		return Number(this.#readBucket(bucket).count);
+	}
+
+	#readBucket(bucket: Uint8Array | undefined): Bucket {
+		const length = shareLength(this.task.vdaf);
+		if (!bucket)
+			return {
+				share: new Uint8Array(length),
+				count: 0n,
+				checksum: new Uint8Array(32),
+				first: NO_TIME,
+				last: 0n,
+			};
+		const reader = new Reader(bytes(bucket));
+		const value = {
+			share: reader.take(length),
+			count: reader.u64(),
+			checksum: reader.take(32),
+			first: reader.u64(),
+			last: reader.u64(),
+		};
+		reader.end();
+		return value;
+	}
+
+	#writeBucket(bucket: Bucket): Uint8Array<ArrayBuffer> {
+		return concat(
+			bucket.share,
+			uint(bucket.count, 8),
+			bucket.checksum,
+			uint(bucket.first, 8),
+			uint(bucket.last, 8),
+		);
+	}
+
+	/** The interval a merged bucket's reports span, in DAP time units. */
+	protected bucketInterval(bucket: Uint8Array): {
+		start: bigint;
+		duration: bigint;
+	} {
+		const { first, last, count } = this.#readBucket(bucket);
+		if (!count) throw new DAPError("InvalidMessage", "Empty batch bucket");
+		return { start: first, duration: last - first + 1n };
+	}
+
+	protected bucketChecksum(bucket: Uint8Array): Uint8Array {
+		return this.#readBucket(bucket).checksum;
+	}
+
+	protected bucketShare(bucket: Uint8Array): Uint8Array {
+		return this.#readBucket(bucket).share;
+	}
+
+	protected get firstVerifyKey(): { id: number; key: Uint8Array } {
+		return {
+			id: this.#firstVerifyKey,
+			key: this.#verifyKeys.get(this.#firstVerifyKey)!,
+		};
+	}
+
+	protected verifyKey(id: number): Uint8Array | undefined {
+		return this.#verifyKeys.get(id);
+	}
+
+	protected knowsConfig(id: number): boolean {
+		return this.#keys.has(id);
+	}
+
+	/** Report times more than the skew allowance ahead of the clock are too early. */
+	protected tooEarly(time: bigint): boolean {
+		const now = this.#clock();
+		if (!Number.isSafeInteger(now) || now < 0)
+			throw new DAPError("InvalidMessage", "Invalid current time");
+		return (
+			time * BigInt(this.task.timePrecision) >
+			BigInt(Math.floor(now / 1000)) + BigInt(this.#maxSkew)
+		);
+	}
+
+	protected interval(start: bigint, duration: bigint): Interval {
+		try {
+			return {
+				start: toMs(this.task, start),
+				end: toMs(this.task, start + duration),
+			};
+		} catch (cause) {
+			throw new DAPError("InvalidMessage", "Batch interval is out of range", {
+				cause,
+				type: "batchInvalid",
+			});
+		}
+	}
+
+	protected minimumBatch(count: bigint): void {
+		if (count < BigInt(this.task.minBatchSize))
+			throw new DAPError(
+				"InvalidMessage",
+				"Batch is smaller than the minimum",
+				{
+					type: "invalidBatchSize",
+				},
+			);
+	}
+
+	/** Decrypt and validate one input share (DAP 19, 4.5.3.3 and 4.5.3.4). */
+	protected async open(
+		metadata: ReportMetadata,
+		publicShare: Uint8Array,
+		ciphertext: HpkeCiphertext,
+	): Promise<Uint8Array> {
+		const vdaf = this.task.vdaf;
+		const key = this.#keys.get(ciphertext.configId);
+		if (!key) throw new Rejection("hpke-unknown-config-id");
+		if (
+			publicShare.length !== (vdaf.type === "prio3-histogram" ? 64 : 0) ||
+			metadata.publicExtensions.length
+		)
+			throw new Rejection("invalid-message");
+		if (this.tooEarly(metadata.time)) throw new Rejection("report-too-early");
+		if (!this.task.inInterval(metadata.time))
+			throw new Rejection("report-dropped");
+		const aad = encodeInputShareAad(
+			decodeId(this.task.id, 32),
+			this.task.encodeConfiguration(),
+			metadata,
+			publicShare,
+		);
+		const info = concat(
+			new TextEncoder().encode("dap-19 input share"),
+			Uint8Array.of(1, this.#role === "leader" ? 2 : 3),
+		);
+		let plaintext: Uint8Array;
+		try {
+			plaintext = await suite.Open(key, ciphertext.enc, ciphertext.payload, {
+				info,
+				aad,
+			});
+		} catch {
+			throw new Rejection("hpke-decrypt-error");
+		}
+		try {
+			const reader = new Reader(plaintext);
+			if (reader.vector(2).length) throw new RangeError("Private extension");
+			const share = reader.vector(4, 1);
+			reader.end();
+			bytes(share, inputShareLength(vdaf, this.#role));
+			if (this.#role === "leader") checkLeaderShare(vdaf, share);
+			return share;
+		} catch {
+			throw new Rejection("invalid-message");
+		}
+	}
+
+	/** Seal an aggregate share to the collector (DAP 19, 4.6.7). */
+	protected async sealShare(
+		collectionRequest: Uint8Array,
+		share: Uint8Array,
+	): Promise<HpkeCiphertext> {
+		const collector = this.#collector;
+		if (!collector)
+			throw new DAPError("InvalidTask", "No collector HPKE configuration");
+		const sealed = await suite.Seal(
+			await suite.DeserializePublicKey(collector.publicKey),
+			share,
+			{
+				info: concat(
+					new TextEncoder().encode("dap-19 aggregate share"),
+					Uint8Array.of(this.#role === "leader" ? 2 : 3, 0),
+				),
+				aad: concat(
+					decodeId(this.task.id, 32),
+					this.task.encodeConfiguration(),
+					collectionRequest,
+				),
+			},
+		);
+		return {
+			configId: collector.id,
+			enc: sealed.encapsulatedSecret,
+			payload: sealed.ciphertext,
+		};
+	}
+}
+
+function jobHeader(verificationKeyId: number): Uint8Array {
+	return concat(
+		uint(verificationKeyId, 1),
+		vector(new Uint8Array(), 4),
+		vector(new Uint8Array(), 2),
+	);
+}
+
+function reject(id: Uint8Array, error: ReportError): Uint8Array {
+	return concat(id, uint(2, 1), uint(reportErrorCode(error), 1));
+}
+
+export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
+	private constructor(
+		task: Task<V>,
+		options: AggregatorOptions,
+		keys: ReadonlyMap<number, CryptoKeyPair>,
+		configs: HpkeConfigList,
+	) {
+		super("leader", task, options, keys, configs);
+		Object.freeze(this);
+	}
+
+	static async create<V extends Vdaf>(
+		task: Task<V>,
+		options: AggregatorOptions,
+	): Promise<Leader<V>> {
+		const { keys, configs } = await Aggregator.load(task, options);
+		return new Leader(task, options, keys, configs);
+	}
+
+	/**
+	 * Check an UploadReq body (DAP 19, 4.4.2.2) without decrypting it. The
+	 * host still checks replay and collected buckets before storing reports.
+	 */
+	upload(body: Uint8Array): Upload {
+		const decoded = decodeUploadRequest(body);
+		const statuses: (ReportError | undefined)[] = [];
+		const first = new Map<string, number>();
+		const reports: UploadedReport[] = [];
+		const rejected: ReportRejectionEntry[] = [];
+		for (const [index, report] of decoded.entries()) {
+			const id = base64url(report.metadata.id) as ReportId;
+			const error: ReportError | undefined = first.has(id)
+				? "report-replayed"
+				: report.metadata.publicExtensions.length
+					? "unsupported-extension"
+					: !this.knowsConfig(report.leader.configId)
+						? "hpke-unknown-config-id"
+						: this.tooEarly(report.metadata.time)
+							? "report-too-early"
+							: !this.task.inInterval(report.metadata.time)
+								? "report-dropped"
+								: undefined;
+			if (!first.has(id)) first.set(id, index);
+			statuses.push(error);
+			if (error) rejected.push(Object.freeze({ id, error }));
+			else
+				reports.push(
+					Object.freeze({
+						id,
+						time: toMs(this.task, report.metadata.time),
+						report: encodeReport(report),
+					}),
 				);
-				for (let offset = 0; offset < share.length - 32; offset += 16) {
-					const value =
-						view.getBigUint64(offset, true) |
-						(view.getBigUint64(offset + 8, true) << 64n);
-					if (value >= P128)
-						throw new RangeError("Non-canonical Field128 element");
+		}
+		return Object.freeze({
+			reports: Object.freeze(reports),
+			rejected: Object.freeze(rejected),
+			respond: (extra: readonly ReportRejectionEntry[] = []) => {
+				const all = statuses.slice();
+				for (const { id, error } of extra) {
+					const index = first.get(id);
+					if (index === undefined || all[index])
+						throw new DAPError(
+							"InvalidMessage",
+							"Rejection does not match an accepted report",
+						);
+					reportErrorCode(error);
+					all[index] = error;
 				}
+				return encodeUploadErrors(
+					decoded.flatMap((report, index) => {
+						const error = all[index];
+						return error ? [{ id: base64url(report.metadata.id), error }] : [];
+					}),
+				);
+			},
+		});
+	}
+
+	/**
+	 * Decrypt and verify stored reports locally and build one
+	 * AggregationJobInitReq. The host must first have checked replay and
+	 * collected buckets for each report (DAP 19, 4.5.3.1).
+	 */
+	async prepare(reports: readonly Uint8Array[]): Promise<AggregationJob> {
+		if (!reports.length)
+			throw new DAPError("InvalidMessage", "Expected at least one report");
+		const { id: keyId, key } = this.firstVerifyKey;
+		const seen = new Set<string>();
+		const ready: ReportRef[] = [];
+		const rejected: (ReportRef & { error: ReportError })[] = [];
+		const requestParts: Uint8Array[] = [];
+		const stateParts: Uint8Array[] = [];
+		for (const encoded of reports) {
+			const report: Report = decodeReport(encoded);
+			const id = base64url(report.metadata.id) as ReportId;
+			if (seen.has(id))
+				throw new DAPError("InvalidMessage", "Duplicate report ID in job");
+			seen.add(id);
+			let time: number;
+			try {
+				time = toMs(this.task, report.metadata.time);
+			} catch {
+				rejected.push({ id, time: 0, error: "report-too-early" });
+				continue;
+			}
+			let init: { state: Uint8Array; outbound: Uint8Array };
+			try {
+				const input = await this.open(
+					report.metadata,
+					report.publicShare,
+					report.leader,
+				);
+				try {
+					init = leaderPrio3Init(
+						this.task,
+						key,
+						report.metadata.id,
+						report.publicShare,
+						input,
+					);
+				} catch {
+					throw new Rejection("vdaf-verify-error");
+				}
+			} catch (error) {
+				if (!(error instanceof Rejection)) throw error;
+				rejected.push(Object.freeze({ id, time, error: error.error }));
+				continue;
+			}
+			ready.push(Object.freeze({ id, time }));
+			stateParts.push(
+				report.metadata.id,
+				uint(report.metadata.time, 8),
+				vector(init.state, 4),
+			);
+			requestParts.push(
+				concat(
+					report.metadata.id,
+					uint(report.metadata.time, 8),
+					vector(new Uint8Array(), 2),
+					vector(report.publicShare, 4),
+					uint(report.helper.configId, 1),
+					vector(report.helper.enc, 2, 1),
+					vector(report.helper.payload, 4, 1),
+					vector(init.outbound, 4, 1),
+				),
+			);
+		}
+		return Object.freeze({
+			request: ready.length
+				? concatParts([jobHeader(keyId), ...requestParts])
+				: undefined,
+			state: concatParts(stateParts),
+			reports: Object.freeze(ready),
+			rejected: Object.freeze(rejected),
+		});
+	}
+
+	/**
+	 * Finish from saved state once the Helper's AggregationJobResp arrives. A
+	 * response that does not line up with the job throws, and the Leader
+	 * must abandon the job (DAP 19, 4.5.3.1).
+	 */
+	finish(state: Uint8Array, response: Uint8Array): AggregatedReport[] {
+		const saved = new Reader(bytes(state));
+		const reader = new Reader(bytes(response));
+		const results: AggregatedReport[] = [];
+		try {
+			while (saved.remaining) {
+				const id = saved.take(16);
+				const time = saved.u64();
+				const verifier = saved.vector(4);
+				const ref = {
+					id: base64url(id) as ReportId,
+					time: toMs(this.task, time),
+				};
+				if (!reader.take(16).every((byte, i) => byte === id[i]))
+					throw new RangeError("Wrong report ID");
+				const type = reader.uint(1);
+				if (type === 2) {
+					const error = reportErrors[reader.uint(1)];
+					if (!error) throw new RangeError("Unknown report error");
+					results.push(Object.freeze({ ...ref, error }));
+				} else if (type === 0) {
+					const outputShare = leaderPrio3Finish(
+						this.task,
+						verifier,
+						reader.vector(4, 1),
+					);
+					results.push(Object.freeze({ ...ref, outputShare }));
+				} else throw new RangeError("Unexpected response type");
+			}
+			reader.end();
+		} catch (cause) {
+			throw new DAPError(
+				"InvalidResponse",
+				"Aggregation response does not match the job",
+				{ cause },
+			);
+		}
+		return results;
+	}
+
+	/**
+	 * Validate a CollectionJobReq (DAP 19, 4.6.1). The host checks that the
+	 * interval's buckets are not collected yet and have no pending jobs,
+	 * then merges them.
+	 */
+	collection(body: Uint8Array): CollectionJob {
+		const request = bytes(body).slice();
+		const query = decodeCollectionJobRequest(request);
+		const interval = this.interval(query.start, query.duration);
+		return Object.freeze({
+			interval,
+			aggregateShareRequest: (bucket: Uint8Array) => {
+				const count = BigInt(this.bucketReportCount(bucket));
+				this.minimumBatch(count);
+				return encodeAggregateShareRequest(
+					request,
+					count,
+					this.bucketChecksum(bucket),
+				);
+			},
+			finish: async (bucket: Uint8Array, helperResponse: Uint8Array) => {
+				const count = BigInt(this.bucketReportCount(bucket));
+				this.minimumBatch(count);
+				let helper: HpkeCiphertext;
+				try {
+					helper = decodeAggregateShare(helperResponse);
+				} catch (cause) {
+					throw new DAPError("InvalidResponse", "Malformed aggregate share", {
+						cause,
+					});
+				}
+				const span = this.bucketInterval(bucket);
+				return encodeCollectionJobResponse({
+					reportCount: count,
+					start: span.start,
+					duration: span.duration,
+					leader: await this.sealShare(request, this.bucketShare(bucket)),
+					helper,
+				});
+			},
+		});
+	}
+}
+
+export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
+	private constructor(
+		task: Task<V>,
+		options: AggregatorOptions,
+		keys: ReadonlyMap<number, CryptoKeyPair>,
+		configs: HpkeConfigList,
+	) {
+		super("helper", task, options, keys, configs);
+		Object.freeze(this);
+	}
+
+	static async create<V extends Vdaf>(
+		task: Task<V>,
+		options: AggregatorOptions,
+	): Promise<Helper<V>> {
+		const { keys, configs } = await Aggregator.load(task, options);
+		return new Helper(task, options, keys, configs);
+	}
+
+	/**
+	 * Verify an AggregationJobInitReq (DAP 19, 4.5.3.2). Commit the accepted
+	 * output shares, then call `seal()`.
+	 */
+	async verify(request: Uint8Array): Promise<VerifiedJob> {
+		const reader = new Reader(bytes(request));
+		const keyId = reader.uint(1);
+		if (reader.vector(4).length)
+			throw new DAPError(
+				"InvalidMessage",
+				"Prio3 takes no aggregation parameter",
+				{
+					type: "invalidAggregationParameter",
+				},
+			);
+		if (reader.vector(2).length)
+			throw new DAPError(
+				"InvalidMessage",
+				"Unsupported aggregation job extension",
+				{
+					type: "unsupportedExtension",
+				},
+			);
+		const entries = [];
+		const seen = new Set<string>();
+		while (reader.remaining) {
+			const metadata = { id: reader.take(16), time: reader.u64() };
+			const id = base64url(metadata.id) as ReportId;
+			if (seen.has(id))
+				throw new DAPError("InvalidMessage", "Duplicate report ID in job");
+			seen.add(id);
+			entries.push({
+				id,
+				metadata: { ...metadata, publicExtensions: [] },
+				publicExtensions: reader.vector(2).length,
+				publicShare: reader.vector(4),
+				ciphertext: {
+					configId: reader.uint(1),
+					enc: reader.vector(2, 1),
+					payload: reader.vector(4, 1),
+				},
+				inbound: reader.vector(4, 1),
+			});
+		}
+		if (!entries.length)
+			throw new DAPError("InvalidMessage", "Empty aggregation job");
+		const verifyKey = this.verifyKey(keyId);
+		const results: (AggregatedReport & { response?: Uint8Array })[] = [];
+		for (const entry of entries) {
+			let time: number;
+			try {
+				time = toMs(this.task, entry.metadata.time);
+			} catch {
+				results.push({ id: entry.id, time: 0, error: "report-too-early" });
+				continue;
+			}
+			try {
+				if (!verifyKey) throw new Rejection("unknown-verification-key-id");
+				if (entry.publicExtensions) throw new Rejection("invalid-message");
+				const input = await this.open(
+					entry.metadata,
+					entry.publicShare,
+					entry.ciphertext,
+				);
+				let step: { outputShare: Uint8Array; outbound: Uint8Array };
+				try {
+					step = helperPrio3Init(
+						this.task,
+						verifyKey,
+						entry.metadata.id,
+						entry.publicShare,
+						input,
+						entry.inbound,
+					);
+				} catch {
+					throw new Rejection("vdaf-verify-error");
+				}
+				results.push({
+					id: entry.id,
+					time,
+					outputShare: step.outputShare,
+					response: concat(
+						entry.metadata.id,
+						uint(0, 1),
+						vector(step.outbound, 4, 1),
+					),
+				});
+			} catch (error) {
+				if (!(error instanceof Rejection)) throw error;
+				results.push({ id: entry.id, time, error: error.error });
 			}
 		}
-	} catch (cause) {
-		throw new DAPError("InvalidReport", "Invalid Prio3 input share", { cause });
+		return Object.freeze({
+			reports: Object.freeze(
+				results.map(({ response: _, ...report }) => Object.freeze(report)),
+			) as readonly AggregatedReport[],
+			seal: (refused: readonly ReportRejectionEntry[] = []) => {
+				const errors = new Map<string, ReportError>();
+				for (const { id, error } of refused) {
+					reportErrorCode(error);
+					if (!seen.has(id) || errors.has(id))
+						throw new DAPError(
+							"InvalidMessage",
+							"Rejection does not match a report in the job",
+						);
+					errors.set(id, error);
+				}
+				return concatParts(
+					results.map((report) => {
+						const id = decodeId(report.id, 16);
+						const error = errors.get(report.id) ?? report.error;
+						return error ? reject(id, error) : report.response!;
+					}),
+				);
+			},
+		});
 	}
-	return share;
-}
 
-export async function openCountInputShare(
-	task: Task<number>,
-	role: "leader" | "helper",
-	metadata: ReportMetadata,
-	publicShare: Uint8Array,
-	ciphertext: HpkeCiphertext,
-	key: AggregatorKey,
-	nowMs = Date.now(),
-): Promise<Uint8Array> {
-	if (task.vdaf.type !== "prio3-count")
-		throw new DAPError("InvalidTask", "Expected a Count task");
-	return openPrio3InputShare(
-		task,
-		role,
-		metadata,
-		publicShare,
-		ciphertext,
-		key,
-		nowMs,
-	);
+	/**
+	 * Validate an AggregateShareReq (DAP 19, 4.6.4). The host checks that the
+	 * interval's buckets are not collected yet, then merges them.
+	 */
+	aggregateShare(body: Uint8Array): AggregateShareJob {
+		const request = decodeAggregateShareRequest(bytes(body));
+		const interval = this.interval(request.start, request.duration);
+		return Object.freeze({
+			interval,
+			finish: async (bucket: Uint8Array) => {
+				const count = BigInt(this.bucketReportCount(bucket));
+				this.minimumBatch(count);
+				const checksum = this.bucketChecksum(bucket);
+				if (
+					count !== request.reportCount ||
+					!checksum.every((byte, i) => byte === request.checksum[i])
+				)
+					throw new DAPError(
+						"InvalidMessage",
+						"Aggregators disagree on the batch",
+						{ type: "batchMismatch" },
+					);
+				return encodeAggregateShare(
+					await this.sealShare(
+						request.collectionRequest,
+						this.bucketShare(bucket),
+					),
+				);
+			},
+		});
+	}
 }
-
-function context(task: Task<unknown>): Uint8Array {
+function context(task: Task): Uint8Array {
 	return concat(new TextEncoder().encode("dap-19"), decodeId(task.id, 32));
 }
 
 function leaderPrio3Init(
-	task: Task<unknown>,
+	task: Task,
 	verifyKey: Uint8Array,
 	nonce: Uint8Array,
 	publicShare: Uint8Array,
@@ -412,7 +1108,7 @@ function leaderPrio3Init(
 	if (task.vdaf.type === "prio3-sum") {
 		const share = sumVerifierShare(
 			0,
-			task.vdaf.maxMeasurement!,
+			task.vdaf.maxMeasurement,
 			verifyKey,
 			ctx,
 			nonce,
@@ -426,8 +1122,8 @@ function leaderPrio3Init(
 	}
 	const share = histogramVerifierShare(
 		0,
-		task.vdaf.length!,
-		task.vdaf.chunkLength!,
+		task.vdaf.length,
+		task.vdaf.chunkLength,
 		verifyKey,
 		ctx,
 		nonce,
@@ -441,7 +1137,7 @@ function leaderPrio3Init(
 }
 
 function helperPrio3Init(
-	task: Task<unknown>,
+	task: Task,
 	verifyKey: Uint8Array,
 	nonce: Uint8Array,
 	publicShare: Uint8Array,
@@ -462,7 +1158,7 @@ function helperPrio3Init(
 		const leaderShare = readPingPong(inbound, 0, 24);
 		const helper = sumVerifierShare(
 			1,
-			task.vdaf.maxMeasurement!,
+			task.vdaf.maxMeasurement,
 			verifyKey,
 			ctx,
 			nonce,
@@ -477,11 +1173,11 @@ function helperPrio3Init(
 			),
 		};
 	}
-	const chunkLength = task.vdaf.chunkLength!;
+	const chunkLength = task.vdaf.chunkLength;
 	const leaderShare = readPingPong(inbound, 0, (2 * chunkLength + 2) * 16 + 32);
 	const helper = histogramVerifierShare(
 		1,
-		task.vdaf.length!,
+		task.vdaf.length,
 		chunkLength,
 		verifyKey,
 		ctx,
@@ -501,7 +1197,7 @@ function helperPrio3Init(
 }
 
 function leaderPrio3Finish(
-	task: Task<unknown>,
+	task: Task,
 	state: Uint8Array,
 	inbound: Uint8Array,
 ): Uint8Array {
@@ -512,459 +1208,10 @@ function leaderPrio3Finish(
 		readPingPong(inbound, 2, 0);
 		return state.slice();
 	}
-	const length = task.vdaf.length! * 16;
+	const length = task.vdaf.length * 16;
 	bytes(state, length + 32);
 	const message = readPingPong(inbound, 2, 32);
 	if (!message.every((byte, i) => byte === state[length + i]))
 		throw new RangeError("Prio3Histogram joint randomness mismatch");
 	return state.slice(0, length);
-}
-
-function countJobHeader(verificationKeyId: number): Uint8Array {
-	return concat(
-		uint(verificationKeyId, 1),
-		vector(new Uint8Array(), 4),
-		vector(new Uint8Array(), 2),
-	);
-}
-
-/** Build one DAP 19 Prio3 aggregation initialization request. */
-export async function leaderPrio3JobInit(
-	task: Task<unknown>,
-	report: Report,
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): Promise<{
-	request: Uint8Array;
-	state: Uint8Array;
-	reportId: Uint8Array;
-	time: bigint;
-}> {
-	const input = await openPrio3InputShare(
-		task,
-		"leader",
-		report.metadata,
-		report.publicShare,
-		report.leader,
-		key,
-		nowMs,
-	);
-	const { state, outbound } = leaderPrio3Init(
-		task,
-		verifyKey,
-		report.metadata.id,
-		report.publicShare,
-		input,
-	);
-	const helper = report.helper;
-	const request = concat(
-		countJobHeader(verificationKeyId),
-		encodeReportMetadata(report.metadata),
-		vector(report.publicShare, 4),
-		uint(helper.configId, 1),
-		vector(helper.enc, 2, 1),
-		vector(helper.payload, 4, 1),
-		vector(outbound, 4, 1),
-	);
-	return {
-		request,
-		state,
-		reportId: report.metadata.id.slice(),
-		time: report.metadata.time,
-	};
-}
-
-/** Count-compatible one-report entry point. */
-export async function leaderCountJobInit(
-	task: Task<number>,
-	report: Report,
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): Promise<{
-	request: Uint8Array;
-	state: Uint8Array;
-	reportId: Uint8Array;
-	time: bigint;
-}> {
-	if (task.vdaf.type !== "prio3-count")
-		throw new DAPError("InvalidTask", "Expected a Count task");
-	return leaderPrio3JobInit(
-		task,
-		report,
-		key,
-		verificationKeyId,
-		verifyKey,
-		nowMs,
-	);
-}
-
-/** Build one job from distinct Prio3 reports, keeping per-report validation failures. */
-export async function leaderPrio3BatchInit(
-	task: Task<unknown>,
-	reports: readonly Report[],
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): Promise<{
-	request: Uint8Array;
-	reports: { reportId: Uint8Array; time: bigint; state: Uint8Array }[];
-	rejected: { reportId: Uint8Array; error: DAPError }[];
-}> {
-	if (!reports.length)
-		throw new DAPError("InvalidMessage", "Expected at least one report");
-	const seen = new Set<string>();
-	const ready = [];
-	const rejected = [];
-	const header = countJobHeader(verificationKeyId);
-	const requestParts = [header];
-	for (const report of reports) {
-		const reportId = bytes(report.metadata.id, 16);
-		const id = base64url(reportId);
-		if (seen.has(id))
-			throw new DAPError("InvalidMessage", "Duplicate report ID in job");
-		seen.add(id);
-		try {
-			const job = await leaderPrio3JobInit(
-				task,
-				report,
-				key,
-				verificationKeyId,
-				verifyKey,
-				nowMs,
-			);
-			ready.push({ reportId: job.reportId, time: job.time, state: job.state });
-			requestParts.push(job.request.subarray(header.length));
-		} catch (error) {
-			if (
-				!(error instanceof DAPError) ||
-				![
-					"InvalidHpkeConfig",
-					"DecryptionFailed",
-					"InvalidReport",
-					"ReportTooEarly",
-					"ReportDropped",
-				].includes(error.code)
-			)
-				throw error;
-			rejected.push({ reportId: reportId.slice(), error });
-		}
-	}
-	return { request: concatParts(requestParts), reports: ready, rejected };
-}
-
-export async function leaderCountBatchInit(
-	task: Task<number>,
-	reports: readonly Report[],
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): ReturnType<typeof leaderPrio3BatchInit> {
-	if (task.vdaf.type !== "prio3-count")
-		throw new DAPError("InvalidTask", "Expected a Count task");
-	return leaderPrio3BatchInit(
-		task,
-		reports,
-		key,
-		verificationKeyId,
-		verifyKey,
-		nowMs,
-	);
-}
-
-/** Verify each Prio3 report in a job. The host commits and caches the response atomically. */
-export async function helperPrio3BatchInit(
-	task: Task<unknown>,
-	request: Uint8Array,
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): Promise<{
-	response: Uint8Array;
-	reports: {
-		response: Uint8Array;
-		reportId: Uint8Array;
-		time: bigint;
-		outputShare?: Uint8Array;
-	}[];
-}> {
-	requirePrio3Task(task);
-	const reader = new Reader(request);
-	const selectedKey = reader.uint(1);
-	if (reader.vector(4).length || reader.vector(2).length)
-		throw new DAPError(
-			"InvalidMessage",
-			"Expected empty Prio3 parameter and job extensions",
-		);
-	const entries = [];
-	const seen = new Set<string>();
-	while (reader.remaining) {
-		const metadata = {
-			id: reader.take(16),
-			time: reader.u64(),
-			publicExtensions: [],
-		};
-		const id = base64url(metadata.id);
-		if (seen.has(id))
-			throw new DAPError("InvalidMessage", "Duplicate report ID in job");
-		seen.add(id);
-		entries.push({
-			metadata,
-			unsupportedPublicExtension: reader.vector(2).length > 0,
-			publicShare: reader.vector(4),
-			ciphertext: {
-				configId: reader.uint(1),
-				enc: reader.vector(2, 1),
-				payload: reader.vector(4, 1),
-			},
-			inbound: reader.vector(4, 1),
-		});
-	}
-	if (!entries.length)
-		throw new DAPError("InvalidMessage", "Empty aggregation job");
-	const results = [];
-	for (const entry of entries) {
-		const { metadata, publicShare, ciphertext, inbound } = entry;
-		const reject = (code: number) => ({
-			response: encodeCountJobRejection(metadata.id, code),
-			reportId: metadata.id,
-			time: metadata.time,
-		});
-		if (selectedKey !== verificationKeyId) {
-			results.push(reject(9));
-			continue;
-		}
-		if (entry.unsupportedPublicExtension) {
-			results.push(reject(7));
-			continue;
-		}
-		let input: Uint8Array;
-		try {
-			input = await openPrio3InputShare(
-				task,
-				"helper",
-				metadata,
-				publicShare,
-				ciphertext,
-				key,
-				nowMs,
-			);
-		} catch (cause) {
-			const code =
-				cause instanceof DAPError && cause.code === "InvalidHpkeConfig"
-					? 4
-					: cause instanceof DAPError && cause.code === "DecryptionFailed"
-						? 5
-						: cause instanceof DAPError && cause.code === "ReportTooEarly"
-							? 8
-							: cause instanceof DAPError && cause.code === "ReportDropped"
-								? 3
-								: 7;
-			results.push(reject(code));
-			continue;
-		}
-		try {
-			const { outputShare, outbound } = helperPrio3Init(
-				task,
-				verifyKey,
-				metadata.id,
-				publicShare,
-				input,
-				inbound,
-			);
-			results.push({
-				response: concat(metadata.id, Uint8Array.of(0), vector(outbound, 4, 1)),
-				reportId: metadata.id,
-				time: metadata.time,
-				outputShare,
-			});
-		} catch {
-			results.push(reject(6));
-		}
-	}
-	return {
-		response: concatParts(results.map((result) => result.response)),
-		reports: results,
-	};
-}
-
-export async function helperCountBatchInit(
-	task: Task<number>,
-	request: Uint8Array,
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): ReturnType<typeof helperPrio3BatchInit> {
-	if (task.vdaf.type !== "prio3-count")
-		throw new DAPError("InvalidTask", "Expected a Count task");
-	return helperPrio3BatchInit(
-		task,
-		request,
-		key,
-		verificationKeyId,
-		verifyKey,
-		nowMs,
-	);
-}
-
-/** Process a one-report job. */
-export async function helperCountJobInit(
-	task: Task<number>,
-	request: Uint8Array,
-	key: AggregatorKey,
-	verificationKeyId: number,
-	verifyKey: Uint8Array,
-	nowMs = Date.now(),
-): Promise<{
-	response: Uint8Array;
-	reportId: Uint8Array;
-	time: bigint;
-	outputShare?: Uint8Array;
-}> {
-	const job = await helperCountBatchInit(
-		task,
-		request,
-		key,
-		verificationKeyId,
-		verifyKey,
-		nowMs,
-	);
-	if (job.reports.length !== 1)
-		throw new DAPError("InvalidMessage", "Expected one report");
-	return job.reports[0]!;
-}
-
-type FinishedReport = { outputShare: Uint8Array } | { reportError: number };
-type PendingReport = {
-	readonly reportId: Uint8Array;
-	readonly time: bigint;
-	readonly state: Uint8Array;
-};
-
-function finishJob(
-	state: Uint8Array,
-	reportId: Uint8Array,
-	response: Uint8Array,
-	finish: (state: Uint8Array, inbound: Uint8Array) => Uint8Array,
-): FinishedReport {
-	const reader = new Reader(response);
-	const receivedId = reader.take(16);
-	if (!bytes(reportId, 16).every((byte, i) => byte === receivedId[i]))
-		throw new DAPError("InvalidMessage", "Wrong report ID");
-	const type = reader.uint(1);
-	if (type === 2) {
-		const reportError = reader.uint(1);
-		reader.end();
-		if (reportError < 1 || reportError > 10)
-			throw new DAPError("InvalidMessage", "Unknown report error");
-		return { reportError };
-	}
-	if (type !== 0)
-		throw new DAPError("InvalidMessage", "Expected continuation or rejection");
-	const inbound = reader.vector(4, 1);
-	reader.end();
-	return { outputShare: finish(state, inbound) };
-}
-
-/** Parse the Helper's response and finish the Leader's Count verification. */
-export function leaderCountJobFinish(
-	state: Uint8Array,
-	reportId: Uint8Array,
-	response: Uint8Array,
-): FinishedReport {
-	return finishJob(state, reportId, response, leaderCountFinish);
-}
-
-/** Finish one Prio3 report after checking the Helper's report ID and response. */
-export function leaderPrio3JobFinish(
-	task: Task<unknown>,
-	state: Uint8Array,
-	reportId: Uint8Array,
-	response: Uint8Array,
-): FinishedReport {
-	requirePrio3Task(task);
-	return finishJob(state, reportId, response, (stored, inbound) =>
-		leaderPrio3Finish(task, stored, inbound),
-	);
-}
-
-function finishBatch(
-	reports: readonly PendingReport[],
-	response: Uint8Array,
-	finish: (
-		state: Uint8Array,
-		reportId: Uint8Array,
-		record: Uint8Array,
-	) => FinishedReport,
-): ({ reportId: Uint8Array; time: bigint } & FinishedReport)[] {
-	if (!reports.length)
-		throw new DAPError("InvalidMessage", "Expected at least one report");
-	const reader = new Reader(response);
-	const results = [];
-	for (const report of reports) {
-		const id = reader.take(16);
-		const type = reader.uint(1);
-		let record: Uint8Array;
-		if (type === 2) record = concat(id, uint(type, 1), uint(reader.uint(1), 1));
-		else if (type === 0)
-			record = concat(id, uint(type, 1), vector(reader.vector(4, 1), 4, 1));
-		else throw new DAPError("InvalidMessage", "Unexpected response type");
-		results.push({
-			reportId: report.reportId,
-			time: report.time,
-			...finish(report.state, report.reportId, record),
-		});
-	}
-	reader.end();
-	return results;
-}
-
-/** Finish a Prio3 batch in response order. */
-export function leaderPrio3BatchFinish(
-	task: Task<unknown>,
-	reports: readonly PendingReport[],
-	response: Uint8Array,
-): ({ reportId: Uint8Array; time: bigint } & FinishedReport)[] {
-	requirePrio3Task(task);
-	return finishBatch(reports, response, (state, reportId, record) =>
-		leaderPrio3JobFinish(task, state, reportId, record),
-	);
-}
-
-/** Finish every Count report in response order. */
-export function leaderCountBatchFinish(
-	reports: readonly PendingReport[],
-	response: Uint8Array,
-): ({ reportId: Uint8Array; time: bigint } & FinishedReport)[] {
-	return finishBatch(reports, response, leaderCountJobFinish);
-}
-
-/** Add a verified Count output share to a stored aggregate share. */
-export function addCountOutputShare(
-	current: Uint8Array,
-	next: Uint8Array,
-): Uint8Array {
-	return encoded([mod(elements(current, 1)[0]! + elements(next, 1)[0]!)]);
-}
-
-/** Add canonical output shares for the task's Prio3 field and output length. */
-export function addPrio3OutputShare(
-	task: Task<unknown>,
-	current: Uint8Array,
-	next: Uint8Array,
-): Uint8Array {
-	requirePrio3Task(task);
-	const width = task.vdaf.type === "prio3-histogram" ? 16 : 8;
-	const length =
-		task.vdaf.type === "prio3-histogram" ? task.vdaf.length! * 16 : 8;
-	bytes(current, length);
-	bytes(next, length);
-	return addFieldOutputShare(current, next, width);
 }

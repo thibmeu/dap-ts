@@ -1,20 +1,5 @@
 import { turboshake128 } from "@noble/hashes/sha3-addons.js";
 
-declare const measurementType: unique symbol;
-export interface ClientVdaf<M> {
-	readonly type: "prio3-count" | "prio3-sum" | "prio3-histogram";
-	readonly maxMeasurement?: bigint;
-	readonly length?: number;
-	readonly chunkLength?: number;
-	readonly [measurementType]: M;
-}
-const count = Object.freeze({ type: "prio3-count" }) as ClientVdaf<number>;
-
-/** Prio3Count accepts numbers and validates that each measurement is 0 or 1. */
-export function prio3Count(): ClientVdaf<number> {
-	return count;
-}
-
 // VDAF draft 20, Sections 6.1.4 and 7.4.1.
 export const P = 0xffff_ffff_0000_0001n;
 const HALF = (P + 1n) / 2n;

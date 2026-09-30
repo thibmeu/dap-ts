@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { concat, decodeId, Reader } from "../src/binary.js";
+import { checkStatus } from "../src/client.js";
 import { createSuite } from "../src/hpke.js";
 import {
 	Client,
@@ -30,6 +31,8 @@ import {
 import vector from "./vectors/hpke-rfc9180-a1.json";
 
 const suite = createSuite();
+const requestBody = async (request: Request) =>
+	new Uint8Array(await request.arrayBuffer());
 let privateKey: CryptoKey;
 beforeAll(async () => {
 	privateKey = await suite.DeserializePrivateKey(hex(vector.skRm));
@@ -47,13 +50,13 @@ it("matches RFC 9180 Appendix A.1.1, including the deterministic encapsulation",
 });
 
 it("prepares an encrypted count report with the exact DAP task/role binding", async () => {
-	const client = new Client(task, {
+	const client = await Client.create(task, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
 	});
 	const prepared = await client.prepareReport(1);
-	expect(prepared.time).toBe(2);
+	expect(prepared.time).toBe(120000);
 	expect(Object.keys(prepared).sort()).toEqual(["id", "time"]);
 	const report = decodeReport(encodeReport(prepared));
 	expect(report.metadata.id).toEqual(
@@ -102,11 +105,13 @@ it("prepares an encrypted count report with the exact DAP task/role binding", as
 			}),
 		).rejects.toThrow();
 	}
-	const same = await new Client(task, {
-		hpke,
-		random: deterministicRandom(),
-		clock: () => 179999,
-	}).prepareReport(1);
+	const same = await (
+		await Client.create(task, {
+			hpke,
+			random: deterministicRandom(),
+			clock: () => 179999,
+		})
+	).prepareReport(1);
 	expect(encodeReport(same)).toEqual(encodeReport(prepared));
 });
 
@@ -126,7 +131,7 @@ it("round-trips a bounded sum task and encrypts its published VDAF shares", asyn
 			configuration: sumTask.encodeConfiguration(),
 		}).expect(prio3Sum(255)),
 	).toThrow();
-	const client = new Client(sumTask, {
+	const client = await Client.create(sumTask, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -182,7 +187,7 @@ it("round-trips a histogram task and encrypts its VDAF shares", async () => {
 		histogramTask.encodeConfiguration(),
 	);
 	expect(() => decoded.expect(prio3Histogram(5, 2))).toThrow();
-	const client = new Client(histogramTask, {
+	const client = await Client.create(histogramTask, {
 		hpke,
 		random: deterministicRandom(),
 		clock: () => 179999,
@@ -226,7 +231,7 @@ it("round-trips a histogram task and encrypts its VDAF shares", async () => {
 });
 
 it("snapshots extensions before encryption and detects duplicate scopes", async () => {
-	const client = new Client(task, { hpke });
+	const client = await Client.create(task, { hpke });
 	const data = hex("0102");
 	const extensions = [{ type: 100, data }];
 	const pending = client.prepareReport(0, { publicExtensions: extensions });
@@ -260,34 +265,38 @@ it("rejects unsupported HPKE suites early and rotates keys explicitly", async ()
 	const unsupported = HpkeConfigList.parse(
 		encodeHpkeConfigList([{ ...config, kemId: 65535 }]),
 	);
-	expect(
-		() =>
-			new Client(task, {
-				hpke: { leader: unsupported, helper: hpke.helper },
-			}),
-	).toThrow(DAPError);
+	await expect(
+		Client.create(task, {
+			hpke: { leader: unsupported, helper: hpke.helper },
+		}),
+	).rejects.toThrow(DAPError);
 	const mixed = HpkeConfigList.parse(
 		encodeHpkeConfigList([{ ...config, id: 1, kemId: 65535 }, config]),
 	);
-	const client = new Client(task, {
+	const client = await Client.create(task, {
 		hpke: { leader: mixed, helper: hpke.helper },
 	});
 	const old = await client.prepareReport(1);
 	const rotated = HpkeConfigList.parse(
 		encodeHpkeConfigList([{ ...config, id: 9 }]),
 	);
-	const next = client.withHpkeConfigs({ leader: rotated, helper: rotated });
+	const next = await client.withHpkeConfigs({
+		leader: rotated,
+		helper: rotated,
+	});
 	expect(
 		decodeReport(encodeReport(await next.prepareReport(1))).leader.configId,
 	).toBe(9);
 	expect(
 		decodeReport(encodeReport(await client.prepareReport(1))).leader.configId,
 	).toBe(7);
-	expect(next.prepareUpload([old]).request.body).toEqual(encodeReport(old));
+	expect(await requestBody(next.prepareUpload([old]).request)).toEqual(
+		encodeReport(old),
+	);
 });
 
 it("validates measurement, time, and random-source inputs", async () => {
-	const client = new Client(task, { hpke });
+	const client = await Client.create(task, { hpke });
 	for (const measurement of [2, -1, NaN, 0.5, true, "1"])
 		await expect(
 			client.prepareReport(measurement as number),
@@ -295,38 +304,44 @@ it("validates measurement, time, and random-source inputs", async () => {
 	for (const time of [-1, NaN, Infinity, 1.2, new Date(NaN)])
 		await expect(client.prepareReport(1, { time })).rejects.toThrow();
 	await expect(
-		new Client(task, {
-			hpke,
-			random: () => new Uint8Array(1),
-		}).prepareReport(1),
+		(
+			await Client.create(task, {
+				hpke,
+				random: () => new Uint8Array(1),
+			})
+		).prepareReport(1),
 	).rejects.toThrow();
-	expect((await client.prepareReport(1, { time: new Date(60000) })).time).toBe(
-		1,
+	expect((await client.prepareReport(1, { time: new Date(119999) })).time).toBe(
+		60000,
 	);
 });
 
 describe("bulk uploads", () => {
 	it("owns report bytes, binds tasks, and reuses report IDs for retries", async () => {
-		const client = new Client(task, { hpke });
+		const client = await Client.create(task, { hpke });
 		const reports = await client.prepareReports([1, 0, 1]);
 		const upload = client.prepareUpload(reports);
-		const first = upload.request.body!.slice();
-		upload.request.body!.fill(0);
+		const first = await requestBody(upload.request);
 		encodeReport(reports[0]!).fill(0);
-		expect(upload.request.body).toEqual(first);
+		expect(await requestBody(upload.request)).toEqual(first);
 		expect(upload.request.url).toBe(`https://l/tasks/${task.id}/reports`);
+		expect(upload.request.method).toBe("POST");
+		expect(upload.request.redirect).toBe("manual");
 		expect(() => client.prepareUpload([reports[0]!, reports[0]!])).toThrow();
 		expect(() => client.prepareUpload([])).toThrow();
 		expect(() =>
 			client.prepareUpload([{ id: reports[0]!.id, time: 0 } as never]),
 		).toThrow();
-		const other = new Client(Task.create({ ...taskOptions, info: "other" }), {
-			hpke,
-		});
+		const other = await Client.create(
+			Task.create({ ...taskOptions, info: "other" }),
+			{
+				hpke,
+			},
+		);
 		expect(() => other.prepareUpload(reports)).toThrow();
 	});
 	it("processes partial failures in submission order and preserves unknown codes", async () => {
-		const client = new Client(task, { hpke });
+		const client = await Client.create(task, { hpke });
 		const reports = await client.prepareReports([1, 0, 1]);
 		const upload = client.prepareUpload(reports);
 		const status = (i: number, code: number) =>
@@ -334,16 +349,16 @@ describe("bulk uploads", () => {
 		const headers = {
 			"Content-Type": 'Application/PPM-DAP; message="upload-errors";version=19',
 		};
-		expect(upload.process({ status: 204, headers: {}, body: hex("") })).toEqual(
-			{ accepted: reports.map((r) => r.id), rejected: [], ok: true },
-		);
-		const partial = upload.process({
-			status: 200,
-			headers,
-			body: concat(status(0, 4), status(2, 255)),
+		expect(await upload.process(new Response(null, { status: 204 }))).toEqual({
+			accepted: reports.map((r) => r.id),
+			rejected: [],
+			ok: true,
 		});
+		const partial = await upload.process(
+			new Response(concat(status(0, 4), status(2, 255)), { headers }),
+		);
 		expect(partial.accepted).toEqual([reports[1]!.id]);
-		expect(partial.rejected.map((r) => [r.code, r.rawCode])).toEqual([
+		expect(partial.rejected.map((r) => [r.error, r.rawCode])).toEqual([
 			["hpke-unknown-config-id", 4],
 			["unknown", 255],
 		]);
@@ -355,9 +370,9 @@ describe("bulk uploads", () => {
 			status(0, 0),
 			concat(new Uint8Array(16).fill(255), Uint8Array.of(4)),
 		]) {
-			expect(() => upload.process({ status: 200, headers, body })).toThrow(
-				DAPError,
-			);
+			await expect(
+				upload.process(new Response(body, { headers })),
+			).rejects.toThrow(DAPError);
 		}
 		for (const contentType of [
 			"application/json",
@@ -365,24 +380,28 @@ describe("bulk uploads", () => {
 			"application/ppm-dap;message=upload-errors;version=09",
 			"application/ppm-dap;message=upload-errors;message=upload-errors",
 		]) {
-			expect(() =>
-				upload.process({
-					status: 200,
-					headers: { "content-type": contentType },
-					body: status(0, 4),
-				}),
-			).toThrow();
+			await expect(
+				upload.process(
+					new Response(status(0, 4), {
+						headers: { "content-type": contentType },
+					}),
+				),
+			).rejects.toThrow();
 		}
-		expect(() =>
-			upload.process({
-				status: 400,
-				headers: { "content-type": "application/problem+json" },
-				body: text('{"type":"urn:ietf:params:ppm:dap:error:unrecognizedTask"}'),
-			}),
-		).toThrow(DAPError);
+		await expect(
+			upload.process(
+				new Response(
+					text('{"type":"urn:ietf:params:ppm:dap:error:unrecognizedTask"}'),
+					{
+						status: 400,
+						headers: { "content-type": "application/problem+json" },
+					},
+				),
+			),
+		).rejects.toThrow(DAPError);
 	});
 	it("bounds concurrency and preserves measurement order", async () => {
-		const client = new Client(task, { hpke });
+		const client = await Client.create(task, { hpke });
 		const original = Client.prototype.prepareReport;
 		let active = 0,
 			maximum = 0;
@@ -411,4 +430,45 @@ describe("bulk uploads", () => {
 			spy.mockRestore();
 		}
 	});
+});
+
+it("surfaces DAP problem details from error responses", async () => {
+	const problem = async (
+		document: unknown,
+		type = "application/problem+json",
+	) => {
+		try {
+			await checkStatus(
+				new Response(JSON.stringify(document), {
+					status: 400,
+					headers: { "content-type": type },
+				}),
+			);
+		} catch (error) {
+			return error as DAPError;
+		}
+		throw new Error("expected a rejection");
+	};
+	const batchSize = await problem({
+		type: "urn:ietf:params:ppm:dap:error:invalidBatchSize",
+		detail: "only 3 reports",
+		taskid: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
+	});
+	expect(batchSize.problem).toMatchObject({
+		dapError: "invalidBatchSize",
+		detail: "only 3 reports",
+		taskId: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
+	});
+	expect(batchSize.message).toContain("invalidBatchSize");
+	// A non-DAP URI keeps its type but gets no registry token.
+	const foreign = (await problem({ type: "https://example/oops" })).problem;
+	expect(foreign?.type).toBe("https://example/oops");
+	expect(foreign?.dapError).toBeUndefined();
+	// Wrong media type, or a body that is not an object, yields no problem.
+	expect((await problem({ type: "x" }, "text/plain")).problem).toBeUndefined();
+	expect((await problem(["not an object"])).problem).toBeUndefined();
+	expect(
+		(await problem({ type: "urn:ietf:params:ppm:dap:error:invalidMessage" }))
+			.problem?.dapError,
+	).toBe("invalidMessage");
 });
