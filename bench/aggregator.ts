@@ -10,6 +10,7 @@ import {
 	prio3Histogram,
 	prio3Sum,
 	Task,
+	type Vdaf,
 } from "../dist/index.js";
 import { encodeHpkeConfigList, encodeReport } from "../dist/messages.js";
 
@@ -19,8 +20,9 @@ import { encodeHpkeConfigList, encodeReport } from "../dist/messages.js";
 const vector = JSON.parse(
 	await readFile(
 		new URL("../test/vectors/hpke-rfc9180-a1.json", import.meta.url),
+		"utf8",
 	),
-);
+) as { skRm: string; pkRm: string };
 const privateKey = Uint8Array.fromHex(vector.skRm);
 const suite = {
 	kemId: 32,
@@ -35,7 +37,7 @@ const hpke = {
 const verifyKeys = [{ id: 0, key: new Uint8Array(32) }];
 const batch = Number(process.argv[2] ?? 10);
 
-async function measure(fn, samples) {
+async function measure(fn: () => unknown, samples: number) {
 	for (let i = 0; i < 5; i++) await fn();
 	const cpu = process.cpuUsage();
 	const start = performance.now();
@@ -47,12 +49,12 @@ async function measure(fn, samples) {
 	};
 }
 
-const results = {};
+const results: Record<string, unknown> = {};
 for (const [name, vdaf, measurement] of [
 	["count", prio3Count(), 1],
 	["sum", prio3Sum(1337), 42],
 	["histogram", prio3Histogram(100, 10), 2],
-]) {
+] as [string, Vdaf, number][]) {
 	const task = Task.create({
 		id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
 		leader: "https://leader.example/",
@@ -75,13 +77,15 @@ for (const [name, vdaf, measurement] of [
 		verifyKeys,
 	});
 	const job = await leader.prepare(reports);
-	const response = (await helper.verify(job.request)).seal();
+	const request = job.request;
+	if (!request) throw new Error("Every report was rejected");
+	const response = (await helper.verify(request)).seal();
 	const finished = leader.finish(job.state, response);
 	const samples = name === "histogram" ? 10 : 40;
 	results[name] = {
 		leaderPrepare: await measure(() => leader.prepare(reports), samples),
 		helperVerifySeal: await measure(
-			async () => (await helper.verify(job.request)).seal(),
+			async () => (await helper.verify(request)).seal(),
 			samples,
 		),
 		leaderFinish: await measure(
@@ -89,12 +93,12 @@ for (const [name, vdaf, measurement] of [
 			samples,
 		),
 		commitBatch: await measure(() => {
-			let bucket;
+			let bucket: Uint8Array | undefined;
 			for (const report of finished)
-				bucket = leader.addToBucket(bucket, report);
+				if (report.outputShare) bucket = leader.addToBucket(bucket, report);
 		}, samples * 10),
 		bytes: {
-			request: job.request.length,
+			request: request.length,
 			response: response.length,
 			state: job.state.length,
 		},

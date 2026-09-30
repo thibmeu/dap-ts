@@ -24,13 +24,13 @@
     "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc",
     "prepare": "npm run build",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json && tsc -p tsconfig.bench.json",
     "test": "vitest run",
     "test:janus": "test/janus.sh",
-    "lint": "biome check src test",
-    "format": "biome format --write src test",
-    "bench": "npm run build && node bench/count.mjs",
-    "bench:aggregator": "npm run build && node --expose-gc bench/aggregator.mjs"
+    "lint": "biome check src test bench",
+    "format": "biome format --write src test bench",
+    "bench": "npm run build && node bench/count.ts",
+    "bench:aggregator": "npm run build && node --expose-gc bench/aggregator.ts"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
@@ -38,6 +38,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
+    "@types/node": "26.6.3",
     "typescript": "7.0.2",
     "vitest": "5.0.1"
   }
