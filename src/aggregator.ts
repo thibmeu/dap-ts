@@ -33,7 +33,6 @@ import {
 	encodeUploadErrors,
 	type HpkeCiphertext,
 	type HpkeConfig,
-	type Report,
 	type ReportMetadata,
 } from "./messages.js";
 import { expand, mod, P, requireBytes } from "./prio3-count.js";
@@ -53,6 +52,32 @@ const suite = createSuite();
 
 /** Seconds a report timestamp may lead an Aggregator's clock (DAP 19, 4.5.3.4). */
 const DEFAULT_MAX_SKEW_SECONDS = 300;
+
+// Reports have independent HPKE contexts. Refill four slots as each finishes;
+// keep their results in wire order and drain active work before a job fails.
+async function mapReports<T, R>(
+	items: readonly T[],
+	run: (item: T) => Promise<R>,
+): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let next = 0;
+	const workers = await Promise.allSettled(
+		Array.from({ length: Math.min(4, items.length) }, async () => {
+			while (next < items.length) {
+				const index = next++;
+				try {
+					results[index] = await run(items[index]!);
+				} catch (error) {
+					next = items.length;
+					throw error;
+				}
+			}
+		}),
+	);
+	for (const worker of workers)
+		if (worker.status === "rejected") throw worker.reason;
+	return results;
+}
 
 function elements(input: Uint8Array, length: number): bigint[] {
 	requireBytes(input, length * 8);
@@ -359,6 +384,9 @@ abstract class Aggregator<V extends Vdaf> {
 	#maxSkew: number;
 	#clock: () => number;
 	#role: "leader" | "helper";
+	#taskId: Uint8Array;
+	#configuration: Uint8Array;
+	#inputShareInfo: Uint8Array;
 
 	protected constructor(
 		role: "leader" | "helper",
@@ -368,6 +396,12 @@ abstract class Aggregator<V extends Vdaf> {
 		hpkeConfigs: HpkeConfigList,
 	) {
 		this.#role = role;
+		this.#taskId = decodeId(task.id, 32);
+		this.#configuration = task.encodeConfiguration();
+		this.#inputShareInfo = concat(
+			new TextEncoder().encode("dap-19 input share"),
+			Uint8Array.of(1, role === "leader" ? 2 : 3),
+		);
 		this.task = task;
 		this.#keys = keys;
 		this.hpkeConfigs = hpkeConfigs;
@@ -598,19 +632,15 @@ abstract class Aggregator<V extends Vdaf> {
 		if (!this.task.inInterval(metadata.time))
 			throw new Rejection("report-dropped");
 		const aad = encodeInputShareAad(
-			decodeId(this.task.id, 32),
-			this.task.encodeConfiguration(),
+			this.#taskId,
+			this.#configuration,
 			metadata,
 			publicShare,
-		);
-		const info = concat(
-			new TextEncoder().encode("dap-19 input share"),
-			Uint8Array.of(1, this.#role === "leader" ? 2 : 3),
 		);
 		let plaintext: Uint8Array;
 		try {
 			plaintext = await suite.Open(key, ciphertext.enc, ciphertext.payload, {
-				info,
+				info: this.#inputShareInfo,
 				aad,
 			});
 		} catch {
@@ -765,18 +795,27 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 		const rejected: (ReportRef & { error: ReportError })[] = [];
 		const requestParts: Uint8Array[] = [];
 		const stateParts: Uint8Array[] = [];
-		for (const encoded of reports) {
-			const report: Report = decodeReport(encoded);
+		const ctx = context(this.task);
+		const entries = reports.map((encoded) => {
+			const report = decodeReport(encoded);
 			const id = base64url(report.metadata.id) as ReportId;
 			if (seen.has(id))
 				throw new DAPError("InvalidMessage", "Duplicate report ID in job");
 			seen.add(id);
+			return { report, id };
+		});
+		const results = await mapReports(entries, async ({ report, id }) => {
 			let time: number;
 			try {
 				time = toMs(this.task, report.metadata.time);
 			} catch {
-				rejected.push({ id, time: 0, error: "report-too-early" });
-				continue;
+				return {
+					rejected: Object.freeze({
+						id,
+						time: 0,
+						error: "report-too-early" as const,
+					}),
+				};
 			}
 			let init: { state: Uint8Array; outbound: Uint8Array };
 			try {
@@ -788,7 +827,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 				try {
 					init = leaderPrio3Init(
 						this.task.vdaf,
-						context(this.task),
+						ctx,
 						key,
 						report.metadata.id,
 						report.publicShare,
@@ -799,10 +838,17 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 				}
 			} catch (error) {
 				if (!(error instanceof Rejection)) throw error;
-				rejected.push(Object.freeze({ id, time, error: error.error }));
+				return { rejected: Object.freeze({ id, time, error: error.error }) };
+			}
+			return { report, ref: Object.freeze({ id, time }), init };
+		});
+		for (const result of results) {
+			if (result.rejected) {
+				rejected.push(result.rejected);
 				continue;
 			}
-			ready.push(Object.freeze({ id, time }));
+			const { report, ref, init } = result;
+			ready.push(ref);
 			stateParts.push(
 				report.metadata.id,
 				uint(report.metadata.time, 8),
@@ -986,52 +1032,54 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 		if (!entries.length)
 			throw new DAPError("InvalidMessage", "Empty aggregation job");
 		const verifyKey = this.verifyKey(keyId);
-		const results: (AggregatedReport & { response?: Uint8Array })[] = [];
-		for (const entry of entries) {
-			let time: number;
-			try {
-				time = toMs(this.task, entry.metadata.time);
-			} catch {
-				results.push({ id: entry.id, time: 0, error: "report-too-early" });
-				continue;
-			}
-			try {
-				if (!verifyKey) throw new Rejection("unknown-verification-key-id");
-				if (entry.publicExtensions) throw new Rejection("invalid-message");
-				const input = await this.open(
-					entry.metadata,
-					entry.publicShare,
-					entry.ciphertext,
-				);
-				let step: { outputShare: Uint8Array; outbound: Uint8Array };
+		const ctx = context(this.task);
+		const results = await mapReports(
+			entries,
+			async (entry): Promise<AggregatedReport & { response?: Uint8Array }> => {
+				let time: number;
 				try {
-					step = helperPrio3Init(
-						this.task.vdaf,
-						context(this.task),
-						verifyKey,
-						entry.metadata.id,
-						entry.publicShare,
-						input,
-						entry.inbound,
-					);
+					time = toMs(this.task, entry.metadata.time);
 				} catch {
-					throw new Rejection("vdaf-verify-error");
+					return { id: entry.id, time: 0, error: "report-too-early" };
 				}
-				results.push({
-					id: entry.id,
-					time,
-					outputShare: step.outputShare,
-					response: concat(
-						entry.metadata.id,
-						uint(0, 1),
-						vector(step.outbound, 4, 1),
-					),
-				});
-			} catch (error) {
-				if (!(error instanceof Rejection)) throw error;
-				results.push({ id: entry.id, time, error: error.error });
-			}
-		}
+				try {
+					if (!verifyKey) throw new Rejection("unknown-verification-key-id");
+					if (entry.publicExtensions) throw new Rejection("invalid-message");
+					const input = await this.open(
+						entry.metadata,
+						entry.publicShare,
+						entry.ciphertext,
+					);
+					let step: { outputShare: Uint8Array; outbound: Uint8Array };
+					try {
+						step = helperPrio3Init(
+							this.task.vdaf,
+							ctx,
+							verifyKey,
+							entry.metadata.id,
+							entry.publicShare,
+							input,
+							entry.inbound,
+						);
+					} catch {
+						throw new Rejection("vdaf-verify-error");
+					}
+					return {
+						id: entry.id,
+						time,
+						outputShare: step.outputShare,
+						response: concat(
+							entry.metadata.id,
+							uint(0, 1),
+							vector(step.outbound, 4, 1),
+						),
+					};
+				} catch (error) {
+					if (!(error instanceof Rejection)) throw error;
+					return { id: entry.id, time, error: error.error };
+				}
+			},
+		);
 		return Object.freeze({
 			reports: Object.freeze(
 				results.map(({ response: _, ...report }) => Object.freeze(report)),

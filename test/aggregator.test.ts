@@ -1,4 +1,5 @@
-import { expect, it } from "vitest";
+import { CipherSuite } from "hpke";
+import { expect, it, vi } from "vitest";
 import {
 	countVerifierMessage,
 	countVerifierShare,
@@ -493,4 +494,110 @@ it("collects merged buckets end to end", async () => {
 				.finish(leaderBucket, helperShare),
 		),
 	).rejects.toThrow("No collector HPKE configuration");
+});
+
+it("refills four report slots and preserves order when opens finish out of order", async () => {
+	const { leader, helper } = await roles();
+	const c = await client();
+	const reports = (await c.prepareReports(Array(9).fill(1))).map(encodeReport);
+	const original = CipherSuite.prototype.Open;
+	async function held<T>(run: () => Promise<T>): Promise<T> {
+		const releases: (() => void)[] = [];
+		let active = 0,
+			peak = 0;
+		const spy = vi
+			.spyOn(CipherSuite.prototype, "Open")
+			.mockImplementation(async function (...args) {
+				const gate = new Promise<void>((resolve) => releases.push(resolve));
+				active++;
+				peak = Math.max(peak, active);
+				try {
+					const result = await original.apply(this, args);
+					await gate;
+					return result;
+				} finally {
+					active--;
+				}
+			});
+		const pending = run();
+		try {
+			await vi.waitFor(() => expect(releases).toHaveLength(4));
+			// Keep the first three held while the fourth slot processes the rest.
+			for (let count = 5; count <= 9; count++) {
+				releases[count - 2]!();
+				await vi.waitFor(() => expect(releases).toHaveLength(count));
+			}
+			expect(peak).toBe(4);
+			for (const release of [...releases].reverse()) release();
+			return await pending;
+		} finally {
+			for (const release of releases) release();
+			await pending.catch(() => {});
+			spy.mockRestore();
+		}
+	}
+	const job = await held(() => leader.prepare(reports));
+	const expected = reports.map((report) =>
+		decodeReport(report).metadata.id.toBase64({
+			alphabet: "base64url",
+			omitPadding: true,
+		}),
+	);
+	expect(job.reports.map((report) => report.id)).toEqual(expected);
+	const verified = await held(() => helper.verify(job.request!));
+	expect(verified.reports.map((report) => report.id)).toEqual(expected);
+	const finished = leader.finish(job.state, verified.seal());
+	expect(finished.map((report) => report.id)).toEqual(expected);
+	expect(finished.every((report) => report.outputShare)).toBe(true);
+});
+
+it("drains active opens before rejecting an unexpected job failure", async () => {
+	const failure = new Error("clock failed");
+	let fail = false,
+		calls = 0;
+	const leader = await Leader.create(task, {
+		hpkeKeys: [{ configId: 7, privateKey }],
+		verifyKeys,
+		clock: () => {
+			calls++;
+			if (fail) throw failure;
+			return NOW;
+		},
+	});
+	const c = await client();
+	const reports = (await c.prepareReports(Array(9).fill(1))).map(encodeReport);
+	const releases: (() => void)[] = [];
+	const original = CipherSuite.prototype.Open;
+	const spy = vi
+		.spyOn(CipherSuite.prototype, "Open")
+		.mockImplementation(async function (...args) {
+			const gate = new Promise<void>((resolve) => releases.push(resolve));
+			const result = await original.apply(this, args);
+			await gate;
+			return result;
+		});
+	let settled = false;
+	const pending = leader.prepare(reports);
+	void pending.then(
+		() => {
+			settled = true;
+		},
+		() => {
+			settled = true;
+		},
+	);
+	try {
+		await vi.waitFor(() => expect(releases).toHaveLength(4));
+		fail = true;
+		releases[3]!();
+		await vi.waitFor(() => expect(calls).toBe(5));
+		expect(settled).toBe(false);
+		for (const release of releases) release();
+		await expect(pending).rejects.toBe(failure);
+		expect(releases).toHaveLength(4);
+	} finally {
+		for (const release of releases) release();
+		await pending.catch(() => {});
+		spy.mockRestore();
+	}
 });

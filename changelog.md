@@ -4,6 +4,10 @@ Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachang
 
 ## Unreleased
 
+### Changed
+
+- Process up to four reports concurrently per Leader/Helper job, preserving report order and reusing fixed task and HPKE context bytes.
+
 ### Fixed
 
 - Reject Sum collections whose measurement bound times the report count can wrap modulo Field64.
