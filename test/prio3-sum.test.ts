@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { P } from "../src/prio3-count.js";
 import { shardSumWithRandomness, unshardSum } from "../src/prio3-sum.js";
-import { prio3Sum } from "../src/vdaf.js";
+import { prio3Sum, unshard } from "../src/vdaf.js";
 import sum0 from "./vectors/Prio3Sum_0.json";
 import sum2 from "./vectors/Prio3Sum_2.json";
 
@@ -45,4 +45,17 @@ it("validates full Field64 bounds and rejects invalid measurements", () => {
 			shardSumWithRandomness(value as number, 1337, ...args),
 		).toThrow();
 	}
+});
+
+it("rejects ambiguous Sum ranges at the field boundary", () => {
+	const max = P / 2n;
+	const share = new Uint8Array(8);
+	new DataView(share.buffer).setBigUint64(0, 2n * max, true);
+	expect(unshard(prio3Sum(max), [share, new Uint8Array(8)], 2n)).toBe(2n * max);
+	expect(() =>
+		unshard(prio3Sum(max + 1n), [share, new Uint8Array(8)], 2n),
+	).toThrow("field modulus");
+	expect(() =>
+		unshard(prio3Sum(1), [new Uint8Array(8), new Uint8Array(8)], P),
+	).toThrow("field modulus");
 });

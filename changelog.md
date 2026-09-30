@@ -2,6 +2,12 @@
 
 Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Fixed
+
+- Reject Sum collections whose measurement bound times the report count can wrap modulo Field64.
+
 ## [0.1.0] - 2026-09-30
 
 First release, targeting DAP draft 19 and VDAF draft 20 with two aggregators

@@ -55,6 +55,8 @@ for (const { id, error } of result.rejected) console.warn(id, error);
 `task.encodeConfiguration()` and `Task.decode({ id, configuration })` move a
 task between services.
 `prio3Sum(max)` takes an integer from 0 to `max`, as a number or `bigint`.
+Sum collection rejects batches whose report count times `max` reaches the
+Field64 modulus (`18446744069414584321`), since the integer sum could wrap.
 `prio3Histogram(length, chunkLength)` takes a bucket index below `length`, up
 to 4096 buckets.
 

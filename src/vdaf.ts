@@ -1,5 +1,5 @@
 import { concat, Reader, uint } from "./binary.js";
-import { shardCountWithRandomness, unshardCount } from "./prio3-count.js";
+import { P, shardCountWithRandomness, unshardCount } from "./prio3-count.js";
 import {
 	checkHistogram,
 	shardHistogramWithRandomness,
@@ -174,6 +174,9 @@ export function unshard(
 	switch (vdaf.type) {
 		case "prio3-count":
 		case "prio3-sum": {
+			// Modular reconstruction cannot distinguish an integer sum from one plus P.
+			if (vdaf.type === "prio3-sum" && reportCount * vdaf.maxMeasurement >= P)
+				throw new RangeError("Sum batch bound reaches the field modulus");
 			const value = (vdaf.type === "prio3-count" ? unshardCount : unshardSum)(
 				shares,
 			);
