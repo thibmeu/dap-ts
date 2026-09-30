@@ -1,9 +1,27 @@
 {
   "name": "dap-ts",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Distributed Aggregation Protocol in TypeScript",
+  "version": "0.1.0",
+  "description": "Distributed Aggregation Protocol (DAP) and Prio3 VDAFs in TypeScript",
+  "keywords": [
+    "dap",
+    "vdaf",
+    "prio",
+    "prio3",
+    "ppm",
+    "privacy",
+    "aggregation",
+    "hpke"
+  ],
+  "author": "Thibault Meunier",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thibmeu/dap-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thibmeu/dap-ts/issues"
+  },
+  "homepage": "https://github.com/thibmeu/dap-ts#readme",
   "type": "module",
   "sideEffects": false,
   "exports": {
