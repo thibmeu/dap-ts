@@ -1,5 +1,8 @@
 # dap-ts
 
+[![NPM](https://img.shields.io/npm/v/dap-ts?style=flat-square)](https://www.npmjs.com/package/dap-ts)
+[![License](https://img.shields.io/npm/l/dap-ts?style=flat-square)](LICENSE)
+
 TypeScript implementation of the [Distributed Aggregation Protocol (DAP)](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.txt).
 Clients encrypt measurements, two aggregators verify and sum them without
 seeing any single value, and a collector gets only the aggregate.
