@@ -3,14 +3,14 @@
 [![NPM](https://img.shields.io/npm/v/dap-ts?style=flat-square)](https://www.npmjs.com/package/dap-ts)
 [![License](https://img.shields.io/npm/l/dap-ts?style=flat-square)](LICENSE)
 
-TypeScript implementation of the [Distributed Aggregation Protocol (DAP)](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.txt).
+TypeScript implementation of the Distributed Aggregation Protocol (DAP), as specified in [draft-ietf-ppm-dap-19](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html).
 Clients encrypt measurements, two aggregators verify and sum them without
 seeing any single value, and a collector gets only the aggregate.
 
 ## Features
 
 - **DAP draft 19**: all four roles: Client, Leader, Helper, and Collector
-- **VDAF draft 20**: Prio3Count, Prio3Sum, and Prio3Histogram, checked against the published vectors
+- **[VDAF draft 20](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-20.html)**: Prio3Count, Prio3Sum, and Prio3Histogram, checked against the published vectors
 - **Web APIs**: runs in browsers, Web Workers, Cloudflare Workers, and Node.js
 - **Bring your own I/O**: Client and Collector build Web `Request` objects and read `Response` objects; aggregators take and return bytes. HTTP, authentication, and storage stay with you
 
@@ -163,8 +163,8 @@ does not add differential privacy, and a small batch can reveal individual
 values: set `minBatchSize` accordingly.
 
 DAP hides what a client reported, not that it reported. The Leader sees each
-upload's source IP, arrival time, and task ID (DAP 19, Section 8). If that is
-sensitive, send reports through an Oblivious HTTP relay (Section 8.4) or
+upload's source IP, arrival time, and task ID ([draft-ietf-ppm-dap-19, Section 8](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html#section-8)). If that is
+sensitive, send reports through an Oblivious HTTP relay ([Section 8.4](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html#section-8.4)) or
 report on a fixed schedule.
 
 ## License
