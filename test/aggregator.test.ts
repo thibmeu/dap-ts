@@ -2,9 +2,9 @@ import { expect, it } from "vitest";
 import {
 	countVerifierMessage,
 	countVerifierShare,
-	helperCountInit,
-	leaderCountFinish,
-	leaderCountInit,
+	helperPrio3Init,
+	leaderPrio3Finish,
+	leaderPrio3Init,
 } from "../src/aggregator.js";
 import { concat, uint, vector } from "../src/binary.js";
 import { createSuite } from "../src/hpke.js";
@@ -14,6 +14,7 @@ import {
 	DAPError,
 	Helper,
 	Leader,
+	prio3Count,
 	problemResponse,
 	type ReportId,
 	Task,
@@ -24,7 +25,13 @@ import {
 	encodeReport,
 	encodeUploadRequest,
 } from "../src/messages.js";
-import { deterministicRandom, hpke, task, taskOptions } from "./fixtures.js";
+import {
+	collectorKeys,
+	deterministicRandom,
+	hpke,
+	task,
+	taskOptions,
+} from "./fixtures.js";
 import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 import count0 from "./vectors/Prio3Count_0.json";
 import count2 from "./vectors/Prio3Count_2.json";
@@ -34,6 +41,7 @@ import badMeasurement from "./vectors/Prio3Count_bad_meas_share.json";
 import badWire from "./vectors/Prio3Count_bad_wire_seed.json";
 
 const bytes = (hex: string) => Uint8Array.fromHex(hex);
+const count = prio3Count();
 
 for (const [name, vector] of Object.entries({ count0, count2 })) {
 	it(`${name}: matches published verifier shares and completes the two roles`, () => {
@@ -54,9 +62,10 @@ for (const [name, vector] of Object.entries({ count0, count2 })) {
 			expect(countVerifierMessage(leaderShare, helperShare)).toEqual(
 				bytes(report.verifier_messages[0]!),
 			);
-			const leader = leaderCountInit(...args, leaderInput);
-			const helper = helperCountInit(...args, helperInput, leader.outbound);
-			expect(leaderCountFinish(leader.state, helper.outbound)).toEqual(
+			const steps = [count, args[1], args[0], args[2], args[3]] as const;
+			const leader = leaderPrio3Init(...steps, leaderInput);
+			const helper = helperPrio3Init(...steps, helperInput, leader.outbound);
+			expect(leaderPrio3Finish(count, leader.state, helper.outbound)).toEqual(
 				bytes(report.out_shares[0]!),
 			);
 			expect(helper.outputShare).toEqual(bytes(report.out_shares[1]!));
@@ -92,9 +101,14 @@ for (const [name, vector] of Object.entries({
 			report.verifier_shares[0]!.map(bytes),
 		);
 		expect(() => countVerifierMessage(leaderShare, helperShare)).toThrow();
-		const leader = leaderCountInit(...args, bytes(report.input_shares[0]!));
+		const steps = [count, args[1], args[0], args[2], args[3]] as const;
+		const leader = leaderPrio3Init(...steps, bytes(report.input_shares[0]!));
 		expect(() =>
-			helperCountInit(...args, bytes(report.input_shares[1]!), leader.outbound),
+			helperPrio3Init(
+				...steps,
+				bytes(report.input_shares[1]!),
+				leader.outbound,
+			),
 		).toThrow();
 	});
 }
@@ -102,22 +116,27 @@ for (const [name, vector] of Object.entries({
 it("rejects truncated and non-canonical peer messages", () => {
 	const report = count0.reports[0]!;
 	const args = [
-		bytes(count0.verify_key),
+		count,
 		bytes(count0.ctx),
+		bytes(count0.verify_key),
 		bytes(report.nonce),
 		bytes(report.public_share),
 	] as const;
-	const leader = leaderCountInit(...args, bytes(report.input_shares[0]!));
+	const leader = leaderPrio3Init(...args, bytes(report.input_shares[0]!));
 	const helperInput = bytes(report.input_shares[1]!);
 	expect(() =>
-		helperCountInit(...args, helperInput, leader.outbound.subarray(0, 4)),
+		helperPrio3Init(...args, helperInput, leader.outbound.subarray(0, 4)),
 	).toThrow();
 	const changed = leader.outbound.slice();
 	changed.fill(255, 5, 13);
-	expect(() => helperCountInit(...args, helperInput, changed)).toThrow();
-	const helper = helperCountInit(...args, helperInput, leader.outbound);
+	expect(() => helperPrio3Init(...args, helperInput, changed)).toThrow();
+	const helper = helperPrio3Init(...args, helperInput, leader.outbound);
 	expect(() =>
-		leaderCountFinish(leader.state, Uint8Array.of(...helper.outbound, 0)),
+		leaderPrio3Finish(
+			count,
+			leader.state,
+			Uint8Array.of(...helper.outbound, 0),
+		),
 	).toThrow();
 });
 
@@ -372,18 +391,11 @@ it("honours the clock and skew allowance", async () => {
 });
 
 it("collects merged buckets end to end", async () => {
-	const collectorKeys = await createSuite().GenerateKeyPair(true);
-	const collectorConfig = {
-		id: 23,
-		kemId: 32,
-		kdfId: 1,
-		aeadId: 1,
-		publicKey: await createSuite().SerializePublicKey(collectorKeys.publicKey),
-	};
+	const keys = await collectorKeys();
 	const options = {
 		verifyKeys,
 		clock: () => 10_000_000,
-		collector: collectorConfig,
+		collector: keys.config,
 	};
 	const leader = await Leader.create(task, {
 		...options,
@@ -420,10 +432,8 @@ it("collects merged buckets end to end", async () => {
 	expect(leader.bucketReportCount(buckets.leader.get(240_000)!)).toBe(52);
 
 	const collector = await Collector.create(task, {
-		configId: 23,
-		privateKey: await createSuite().SerializePrivateKey(
-			collectorKeys.privateKey,
-		),
+		configId: keys.config.id,
+		privateKey: keys.privateKey,
 	});
 	const prepared = collector.prepare({ start: 120_000, end: 300_000 });
 	const collection = leader.collection(

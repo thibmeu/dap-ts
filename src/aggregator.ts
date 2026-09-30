@@ -145,7 +145,7 @@ function readPingPong(
 }
 
 /** Start the leader's one-round Count verification. Persist state until the helper responds. */
-export function leaderCountInit(
+function leaderCountInit(
 	verifyKey: Uint8Array,
 	context: Uint8Array,
 	nonce: Uint8Array,
@@ -164,7 +164,7 @@ export function leaderCountInit(
 }
 
 /** Verify the leader's Count share and produce the helper's output share. */
-export function helperCountInit(
+function helperCountInit(
 	verifyKey: Uint8Array,
 	context: Uint8Array,
 	nonce: Uint8Array,
@@ -189,10 +189,7 @@ export function helperCountInit(
 }
 
 /** Finish Count verification after receiving the helper's authenticated response. */
-export function leaderCountFinish(
-	state: Uint8Array,
-	inbound: Uint8Array,
-): Uint8Array {
+function leaderCountFinish(state: Uint8Array, inbound: Uint8Array): Uint8Array {
 	const outputShare = elements(state, 1);
 	readPingPong(inbound, 2, 0);
 	return encoded(outputShare);
@@ -790,7 +787,8 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 				);
 				try {
 					init = leaderPrio3Init(
-						this.task,
+						this.task.vdaf,
+						context(this.task),
 						key,
 						report.metadata.id,
 						report.publicShare,
@@ -860,7 +858,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 					results.push(Object.freeze({ ...ref, error }));
 				} else if (type === 0) {
 					const outputShare = leaderPrio3Finish(
-						this.task,
+						this.task.vdaf,
 						verifier,
 						reader.vector(4, 1),
 					);
@@ -1008,7 +1006,8 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 				let step: { outputShare: Uint8Array; outbound: Uint8Array };
 				try {
 					step = helperPrio3Init(
-						this.task,
+						this.task.vdaf,
+						context(this.task),
 						verifyKey,
 						entry.metadata.id,
 						entry.publicShare,
@@ -1095,20 +1094,21 @@ function context(task: Task): Uint8Array {
 	return concat(new TextEncoder().encode("dap-19"), decodeId(task.id, 32));
 }
 
-function leaderPrio3Init(
-	task: Task,
+/** Start the Leader's one-round Prio3 verification. Persist state until the Helper responds. */
+export function leaderPrio3Init(
+	vdaf: Vdaf,
+	ctx: Uint8Array,
 	verifyKey: Uint8Array,
 	nonce: Uint8Array,
 	publicShare: Uint8Array,
 	inputShare: Uint8Array,
 ): { state: Uint8Array; outbound: Uint8Array } {
-	const ctx = context(task);
-	if (task.vdaf.type === "prio3-count")
+	if (vdaf.type === "prio3-count")
 		return leaderCountInit(verifyKey, ctx, nonce, publicShare, inputShare);
-	if (task.vdaf.type === "prio3-sum") {
+	if (vdaf.type === "prio3-sum") {
 		const share = sumVerifierShare(
 			0,
-			task.vdaf.maxMeasurement,
+			vdaf.maxMeasurement,
 			verifyKey,
 			ctx,
 			nonce,
@@ -1122,8 +1122,8 @@ function leaderPrio3Init(
 	}
 	const share = histogramVerifierShare(
 		0,
-		task.vdaf.length,
-		task.vdaf.chunkLength,
+		vdaf.length,
+		vdaf.chunkLength,
 		verifyKey,
 		ctx,
 		nonce,
@@ -1136,16 +1136,17 @@ function leaderPrio3Init(
 	};
 }
 
-function helperPrio3Init(
-	task: Task,
+/** Verify the Leader's Prio3 share and produce the Helper's output share. */
+export function helperPrio3Init(
+	vdaf: Vdaf,
+	ctx: Uint8Array,
 	verifyKey: Uint8Array,
 	nonce: Uint8Array,
 	publicShare: Uint8Array,
 	inputShare: Uint8Array,
 	inbound: Uint8Array,
 ): { outputShare: Uint8Array; outbound: Uint8Array } {
-	const ctx = context(task);
-	if (task.vdaf.type === "prio3-count")
+	if (vdaf.type === "prio3-count")
 		return helperCountInit(
 			verifyKey,
 			ctx,
@@ -1154,11 +1155,11 @@ function helperPrio3Init(
 			inputShare,
 			inbound,
 		);
-	if (task.vdaf.type === "prio3-sum") {
+	if (vdaf.type === "prio3-sum") {
 		const leaderShare = readPingPong(inbound, 0, 24);
 		const helper = sumVerifierShare(
 			1,
-			task.vdaf.maxMeasurement,
+			vdaf.maxMeasurement,
 			verifyKey,
 			ctx,
 			nonce,
@@ -1173,11 +1174,11 @@ function helperPrio3Init(
 			),
 		};
 	}
-	const chunkLength = task.vdaf.chunkLength;
+	const chunkLength = vdaf.chunkLength;
 	const leaderShare = readPingPong(inbound, 0, (2 * chunkLength + 2) * 16 + 32);
 	const helper = histogramVerifierShare(
 		1,
-		task.vdaf.length,
+		vdaf.length,
 		chunkLength,
 		verifyKey,
 		ctx,
@@ -1196,19 +1197,19 @@ function helperPrio3Init(
 	return { outputShare: helper.outputShare, outbound: pingPong(2, message) };
 }
 
-function leaderPrio3Finish(
-	task: Task,
+/** Finish Prio3 verification with the Helper's response. */
+export function leaderPrio3Finish(
+	vdaf: Vdaf,
 	state: Uint8Array,
 	inbound: Uint8Array,
 ): Uint8Array {
-	if (task.vdaf.type === "prio3-count")
-		return leaderCountFinish(state, inbound);
-	if (task.vdaf.type === "prio3-sum") {
+	if (vdaf.type === "prio3-count") return leaderCountFinish(state, inbound);
+	if (vdaf.type === "prio3-sum") {
 		bytes(state, 8);
 		readPingPong(inbound, 2, 0);
 		return state.slice();
 	}
-	const length = task.vdaf.length * 16;
+	const length = vdaf.length * 16;
 	bytes(state, length + 32);
 	const message = readPingPong(inbound, 2, 32);
 	if (!message.every((byte, i) => byte === state[length + i]))

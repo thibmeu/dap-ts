@@ -72,20 +72,6 @@ export function expand(
 	}
 }
 
-/** Shard a count measurement for two aggregators using fresh random bytes. */
-export function shardCount(
-	measurement: number,
-	ctx: Uint8Array,
-	nonce: Uint8Array,
-): { publicShare: Uint8Array; inputShares: [Uint8Array, Uint8Array] } {
-	const rand = crypto.getRandomValues(new Uint8Array(64));
-	try {
-		return shardCountWithRandomness(measurement, ctx, nonce, rand);
-	} finally {
-		rand.fill(0);
-	}
-}
-
 export function shardCountWithRandomness(
 	measurement: number,
 	ctx: Uint8Array,

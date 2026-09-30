@@ -1,3 +1,4 @@
+import { createSuite } from "../src/hpke.js";
 import { HpkeConfigList, prio3Count, Task } from "../src/index.js";
 import { encodeHpkeConfigList } from "../src/messages.js";
 import vector from "./vectors/hpke-rfc9180-a1.json";
@@ -47,4 +48,19 @@ export const hpke = {
 export function deterministicRandom() {
 	let next = 0;
 	return (length: number) => Uint8Array.from({ length }, () => next++ & 255);
+}
+
+export async function collectorKeys() {
+	const suite = createSuite();
+	const pair = await suite.GenerateKeyPair(true);
+	return {
+		config: {
+			id: 23,
+			kemId: 32,
+			kdfId: 1,
+			aeadId: 1,
+			publicKey: await suite.SerializePublicKey(pair.publicKey),
+		},
+		privateKey: await suite.SerializePrivateKey(pair.privateKey),
+	};
 }

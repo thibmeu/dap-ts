@@ -1,10 +1,26 @@
 import { expect, it } from "vitest";
 import {
+	helperPrio3Init,
+	leaderPrio3Finish,
+	leaderPrio3Init,
+} from "../src/aggregator.js";
+import {
 	histogramVerifierMessage,
 	histogramVerifierShare,
 	sumVerifierMessage,
 	sumVerifierShare,
 } from "../src/aggregator-prio3.js";
+import { concat, uint } from "../src/binary.js";
+import { Client, Collector, Helper, Leader, Task } from "../src/index.js";
+import { encodeReport } from "../src/messages.js";
+import { prio3Histogram, prio3Sum } from "../src/vdaf.js";
+import {
+	collectorKeys,
+	deterministicRandom,
+	hpke,
+	taskOptions,
+} from "./fixtures.js";
+import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 import histogram0 from "./vectors/Prio3Histogram_0.json";
 import histogram2 from "./vectors/Prio3Histogram_2.json";
 import badHelperBlind from "./vectors/Prio3Histogram_bad_helper_jr_blind.json";
@@ -99,103 +115,80 @@ for (const [name, vector] of Object.entries({ histogram0, histogram2 })) {
 	});
 }
 
+// Run one report through the production Leader and Helper steps.
+function histogramSteps(
+	vector: typeof histogram0,
+	leaderInput = bytes(vector.reports[0]!.input_shares[0]!),
+) {
+	const report = vector.reports[0]!;
+	const vdaf = prio3Histogram(vector.length, vector.chunk_length);
+	const args = [
+		bytes(vector.ctx),
+		bytes(vector.verify_key),
+		bytes(report.nonce),
+		bytes(report.public_share),
+	] as const;
+	const leader = leaderPrio3Init(vdaf, ...args, leaderInput);
+	const helper = helperPrio3Init(
+		vdaf,
+		...args,
+		bytes(report.input_shares[1]!),
+		leader.outbound,
+	);
+	return { vdaf, leader, helper };
+}
+
+it("completes the published Histogram report through both roles", () => {
+	const { vdaf, leader, helper } = histogramSteps(histogram0);
+	expect(leaderPrio3Finish(vdaf, leader.state, helper.outbound)).toEqual(
+		bytes(histogram0.reports[0]!.out_shares[0]!),
+	);
+});
+
 for (const [name, vector] of Object.entries({
 	badHelperBlind,
 	badLeaderBlind,
 	badPublicShare,
-	badVerifierMessage,
 })) {
-	it(`${name}: rejects the published malformed Histogram transcript`, () => {
-		const report = vector.reports[0]!;
-		const shares = [0, 1].map((id) =>
-			histogramVerifierShare(
-				id as 0 | 1,
-				vector.length,
-				vector.chunk_length,
-				bytes(vector.verify_key),
-				bytes(vector.ctx),
-				bytes(report.nonce),
-				bytes(report.public_share),
-				bytes(report.input_shares[id]!),
-			),
-		);
-		const consistent = () => {
-			const message = histogramVerifierMessage(
-				shares[0]!.verifierShare,
-				shares[1]!.verifierShare,
-				vector.chunk_length,
-				bytes(vector.ctx),
-			);
-			if (
-				!message.every((byte, i) => byte === shares[0]!.jointSeed[i]) ||
-				!message.every((byte, i) => byte === shares[1]!.jointSeed[i]) ||
-				(report.verifier_messages[0] &&
-					!message.every(
-						(byte, i) => byte === bytes(report.verifier_messages[0]!)[i],
-					))
-			)
-				throw new Error("Inconsistent joint randomness");
-		};
-		expect(consistent).toThrow();
+	it(`${name}: the Helper rejects the published malformed transcript`, () => {
+		expect(() => histogramSteps(vector)).toThrow();
 	});
 }
 
+it("badVerifierMessage: the Leader rejects the published verifier message", () => {
+	const { vdaf, leader } = histogramSteps(badVerifierMessage);
+	const message = bytes(badVerifierMessage.reports[0]!.verifier_messages[0]!);
+	expect(() =>
+		leaderPrio3Finish(
+			vdaf,
+			leader.state,
+			concat(Uint8Array.of(2), uint(message.length, 4), message),
+		),
+	).toThrow("joint randomness mismatch");
+});
+
 it("rejects changed Histogram proof, measurement, blind, and field encoding", () => {
-	const vector = histogram0;
-	const report = vector.reports[0]!;
-	const args = [
-		vector.length,
-		vector.chunk_length,
-		bytes(vector.verify_key),
-		bytes(vector.ctx),
-		bytes(report.nonce),
-		bytes(report.public_share),
-	] as const;
-	const original = bytes(report.input_shares[0]!);
-	const helper = histogramVerifierShare(
-		1,
-		...args,
-		bytes(report.input_shares[1]!),
-	);
-	const check = (leaderInput: Uint8Array) => {
-		const leader = histogramVerifierShare(0, ...args, leaderInput);
-		const message = histogramVerifierMessage(
-			leader.verifierShare,
-			helper.verifierShare,
-			vector.chunk_length,
-			bytes(vector.ctx),
-		);
-		if (!message.every((byte, i) => byte === leader.jointSeed[i]))
-			throw new Error("Joint randomness mismatch");
-	};
-	for (const offset of [0, vector.length * 16, original.length - 32]) {
+	const original = bytes(histogram0.reports[0]!.input_shares[0]!);
+	for (const offset of [0, histogram0.length * 16, original.length - 32]) {
 		const changed = original.slice();
 		changed[offset]! ^= 1;
-		expect(() => check(changed)).toThrow();
+		expect(() => histogramSteps(histogram0, changed)).toThrow();
 	}
 	const nonCanonical = original.slice();
 	nonCanonical.fill(255, 0, 16);
-	expect(() => check(nonCanonical)).toThrow();
+	expect(() => histogramSteps(histogram0, nonCanonical)).toThrow();
 });
-
-import { concat } from "../src/binary.js";
-import { Client, Helper, Leader, Task } from "../src/index.js";
-import { encodeReport } from "../src/messages.js";
-import { unshardHistogram } from "../src/prio3-histogram.js";
-import { unshardSum } from "../src/prio3-sum.js";
-import { prio3Histogram, prio3Sum } from "../src/vdaf.js";
-import { deterministicRandom, hpke, taskOptions } from "./fixtures.js";
-import hpkeVector from "./vectors/hpke-rfc9180-a1.json";
 
 for (const [name, vdaf, values, result] of [
 	["Sum", prio3Sum(255), [100, 11], 111n],
 	["Histogram", prio3Histogram(4, 2), [2, 1], [0n, 1n, 1n, 0n]],
 ] as const) {
 	it(`${name}: verifies encrypted reports through a mixed DAP 19 batch`, async () => {
-		const task = Task.create({ ...taskOptions, vdaf });
+		const task = Task.create({ ...taskOptions, minBatchSize: 2, vdaf });
 		const client = await Client.create(task, {
 			hpke,
 			random: deterministicRandom(),
+			clock: () => 179999,
 		});
 		const reports = (await client.prepareReports([...values, values[0]])).map(
 			encodeReport,
@@ -205,13 +198,16 @@ for (const [name, vdaf, values, result] of [
 		damaged[damaged.length - 1]! ^= 1;
 		const privateKey = bytes(hpkeVector.skRm);
 		const verifyKeys = [{ id: 0, key: bytes(sum0.verify_key) }];
+		const collector = await collectorKeys();
 		const leader = await Leader.create(task, {
 			hpkeKeys: [{ configId: 7, privateKey }],
 			verifyKeys,
+			collector: collector.config,
 		});
 		const helper = await Helper.create(task, {
 			hpkeKeys: [{ configId: 8, privateKey }],
 			verifyKeys,
+			collector: collector.config,
 		});
 		const job = await leader.prepare(reports);
 		const verified = await helper.verify(job.request!);
@@ -227,33 +223,47 @@ for (const [name, vdaf, values, result] of [
 			job.reports.map((item) => item.id),
 		);
 		expect(finished[2]).toMatchObject({ error: "hpke-decrypt-error" });
-		if (name === "Histogram") {
-			// A changed verifier message breaks joint randomness agreement.
-			const changed = response.slice();
-			changed[16 + 1 + 4]! ^= 1;
-			expect(() => leader.finish(job.state, changed)).toThrow();
-		}
 		expect(() =>
 			leader.finish(
 				job.state,
 				concat(response.subarray(1), response.subarray(0, 1)),
 			),
 		).toThrow();
-		const share = (
+		// Every report is in the 120 s bucket; collect it end to end.
+		const bucket = (
 			role: Leader | Helper,
 			items: readonly { outputShare?: Uint8Array; id: string; time: number }[],
 		) =>
-			role
-				.addToBucket(
-					role.addToBucket(undefined, items[0] as never),
-					items[1] as never,
-				)
-				.subarray(0, name === "Sum" ? 8 : 64);
-		const shares = [
-			share(leader, finished),
-			share(helper, verified.reports),
-		] as [Uint8Array, Uint8Array];
-		if (name === "Sum") expect(unshardSum(shares)).toBe(result);
-		else expect(unshardHistogram(shares, 4)).toEqual(result);
+			items.reduce<Uint8Array | undefined>(
+				(b, item) =>
+					item.outputShare ? role.addToBucket(b, item as never) : b,
+				undefined,
+			)!;
+		const leaderBucket = bucket(leader, finished);
+		const prepared = (
+			await Collector.create(task, {
+				configId: collector.config.id,
+				privateKey: collector.privateKey,
+			})
+		).prepare({ start: 120_000, end: 180_000 });
+		const collection = leader.collection(
+			new Uint8Array(await prepared.request.arrayBuffer()),
+		);
+		const helperShare = await helper
+			.aggregateShare(collection.aggregateShareRequest(leaderBucket))
+			.finish(bucket(helper, verified.reports));
+		const progress = await prepared.process(
+			new Response(await collection.finish(leaderBucket, helperShare), {
+				headers: {
+					location: "/collection_jobs/1",
+					"content-type": "application/ppm-dap;message=collection-job-resp",
+				},
+			}),
+		);
+		expect(progress).toMatchObject({
+			status: "complete",
+			value: result,
+			reportCount: 2,
+		});
 	});
 }

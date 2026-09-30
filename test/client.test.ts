@@ -1,6 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { concat, decodeId, Reader } from "../src/binary.js";
-import { checkStatus } from "../src/client.js";
 import { createSuite } from "../src/hpke.js";
 import {
 	Client,
@@ -388,17 +387,6 @@ describe("bulk uploads", () => {
 				),
 			).rejects.toThrow();
 		}
-		await expect(
-			upload.process(
-				new Response(
-					text('{"type":"urn:ietf:params:ppm:dap:error:unrecognizedTask"}'),
-					{
-						status: 400,
-						headers: { "content-type": "application/problem+json" },
-					},
-				),
-			),
-		).rejects.toThrow(DAPError);
 	});
 	it("bounds concurrency and preserves measurement order", async () => {
 		const client = await Client.create(task, { hpke });
@@ -433,12 +421,14 @@ describe("bulk uploads", () => {
 });
 
 it("surfaces DAP problem details from error responses", async () => {
+	const client = await Client.create(task, { hpke });
+	const upload = client.prepareUpload([await client.prepareReport(1)]);
 	const problem = async (
 		document: unknown,
 		type = "application/problem+json",
 	) => {
 		try {
-			await checkStatus(
+			await upload.process(
 				new Response(JSON.stringify(document), {
 					status: 400,
 					headers: { "content-type": type },

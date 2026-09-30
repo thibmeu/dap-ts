@@ -1,13 +1,10 @@
 import { Keccak } from "@noble/hashes/sha3.js";
 import { describe, expect, it, vi } from "vitest";
 import {
-	shardCount,
 	shardCountWithRandomness,
 	unshardCount,
 	xof,
 } from "../src/prio3-count.js";
-
-const api = { shardCount, unshardCount };
 
 import count0 from "./vectors/Prio3Count_0.json";
 import count2 from "./vectors/Prio3Count_2.json";
@@ -32,9 +29,7 @@ describe("VDAF draft 20 count vectors", () => {
 
 		it(`${name}: unsharding matches the aggregate result`, () => {
 			expect(
-				api.unshardCount(
-					vector.agg_shares.map(bytes) as [Uint8Array, Uint8Array],
-				),
+				unshardCount(vector.agg_shares.map(bytes) as [Uint8Array, Uint8Array]),
 			).toBe(BigInt(vector.agg_result));
 		});
 	}
@@ -56,13 +51,6 @@ it("matches the official XOF seed and streams the published expansion", () => {
 	} finally {
 		stream.destroy();
 	}
-});
-
-it("uses fresh randomness on every public call", () => {
-	const report = count0.reports[0]!;
-	const first = api.shardCount(1, bytes(count0.ctx), bytes(report.nonce));
-	const second = api.shardCount(1, bytes(count0.ctx), bytes(report.nonce));
-	expect(first.inputShares).not.toEqual(second.inputShares);
 });
 
 it("discards an out-of-field XOF candidate rather than reducing it", () => {
@@ -150,19 +138,19 @@ it("rejects malformed aggregate shares without reducing non-canonical values", (
 		"01000000ffffffff",
 		"ffffffffffffffff",
 	]) {
-		expect(() => api.unshardCount([bytes(value), new Uint8Array(8)])).toThrow();
+		expect(() => unshardCount([bytes(value), new Uint8Array(8)])).toThrow();
 	}
 	expect(() =>
-		api.unshardCount([] as unknown as [Uint8Array, Uint8Array]),
+		unshardCount([] as unknown as [Uint8Array, Uint8Array]),
 	).toThrow();
 });
 
 it("preserves large counts and respects typed-array offsets", () => {
 	const padded = bytes("ff0100000000002000ff");
-	expect(api.unshardCount([padded.subarray(1, 9), new Uint8Array(8)])).toBe(
+	expect(unshardCount([padded.subarray(1, 9), new Uint8Array(8)])).toBe(
 		9007199254740993n,
 	);
 	expect(
-		api.unshardCount([bytes("00000000ffffffff"), bytes("0100000000000000")]),
+		unshardCount([bytes("00000000ffffffff"), bytes("0100000000000000")]),
 	).toBe(0n);
 });
