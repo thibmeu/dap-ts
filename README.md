@@ -9,7 +9,7 @@ seeing any single value, and a collector gets only the aggregate.
 
 ## Features
 
-- **DAP draft 19**: all four roles: Client, Leader, Helper, and Collector
+- **[DAP draft 19](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html)**: all four roles: Client, Leader, Helper, and Collector
 - **[VDAF draft 20](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-20.html)**: Prio3Count, Prio3Sum, and Prio3Histogram, checked against the published vectors
 - **Web APIs**: runs in browsers, Web Workers, Cloudflare Workers, and Node.js
 - **Bring your own I/O**: Client and Collector build Web `Request` objects and read `Response` objects; aggregators take and return bytes. HTTP, authentication, and storage stay with you
