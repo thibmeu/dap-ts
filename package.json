@@ -1,5 +1,5 @@
 {
-  "name": "dap-ts",
+  "name": "@thibmeu/dap",
   "version": "0.1.0",
   "description": "Distributed Aggregation Protocol (DAP) and Prio3 VDAFs in TypeScript",
   "keywords": [

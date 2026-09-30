@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to dap-ts, following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.1.0] - 2026-09-30
 
@@ -15,6 +15,6 @@ and time-interval batches.
 - `Collector` to request collections, resume pending jobs, and decrypt results.
 - `Leader` and `Helper` for upload intake, aggregation jobs, batch buckets, and aggregate shares. The host owns HTTP, authentication, and storage.
 - `DAPError` and `problemResponse()` for RFC 9457 problem details.
-- Binary message codecs in `dap-ts/messages`.
+- Binary message codecs in `@thibmeu/dap/messages`.
 
 [0.1.0]: https://github.com/thibmeu/dap-ts/releases/tag/v0.1.0

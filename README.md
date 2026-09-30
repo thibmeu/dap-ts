@@ -1,7 +1,7 @@
-# dap-ts
+# @thibmeu/dap
 
-[![NPM](https://img.shields.io/npm/v/dap-ts?style=flat-square)](https://www.npmjs.com/package/dap-ts)
-[![License](https://img.shields.io/npm/l/dap-ts?style=flat-square)](LICENSE)
+[![NPM](https://img.shields.io/npm/v/@thibmeu/dap?style=flat-square)](https://www.npmjs.com/package/@thibmeu/dap)
+[![License](https://img.shields.io/npm/l/@thibmeu/dap?style=flat-square)](LICENSE)
 
 TypeScript implementation of the Distributed Aggregation Protocol (DAP), as specified in [draft-ietf-ppm-dap-19](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html).
 Clients encrypt measurements, two aggregators verify and sum them without
@@ -17,7 +17,7 @@ seeing any single value, and a collector gets only the aggregate.
 ## Installation
 
 ```bash
-npm install dap-ts
+npm install @thibmeu/dap
 ```
 
 ## Quick start
@@ -26,7 +26,7 @@ Create a task with the configuration agreed with your Leader and Helper, then
 report a measurement:
 
 ```typescript
-import { Client, HpkeConfigList, Task, prio3Count } from "dap-ts";
+import { Client, HpkeConfigList, Task, prio3Count } from "@thibmeu/dap";
 
 const task = Task.create({
   id: "8BY0RzZMzxvA46_8ymhzycOB9krN-QIGYvg_RsByGec",
@@ -61,7 +61,7 @@ to 4096 buckets.
 Times are Unix milliseconds and report IDs are URL-safe Base64. Retry an
 uncertain upload with the same prepared report so the aggregators can drop the
 duplicate. Rotate aggregator keys with `await client.withHpkeConfigs(hpke)`.
-Binary message codecs are in `dap-ts/messages`.
+Binary message codecs are in `@thibmeu/dap/messages`.
 
 ## Collection
 
@@ -69,7 +69,7 @@ The Collector runs on a backend. Keep its HPKE private key and HTTP credentials
 there.
 
 ```typescript
-import { Collector } from "dap-ts";
+import { Collector } from "@thibmeu/dap";
 
 const collector = await Collector.create(task, {
   configId: collectorConfigId,
@@ -96,7 +96,7 @@ Histogram.
 routes HTTP, authenticates peers, and stores reports, jobs, and batch buckets.
 
 ```typescript
-import { Helper, Leader } from "dap-ts";
+import { Helper, Leader } from "@thibmeu/dap";
 
 const leader = await Leader.create(task, {
   hpkeKeys: [{ configId: 1, privateKey: leaderHpkeKey }],
