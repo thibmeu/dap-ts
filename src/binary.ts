@@ -13,6 +13,14 @@ export function bytes(value: Uint8Array, length?: number): Uint8Array {
 	return value;
 }
 
+/**
+ * An owned copy. Buffer.prototype.slice returns a view, so never use slice()
+ * to take ownership of caller bytes.
+ */
+export function copy(value: Uint8Array): Uint8Array<ArrayBuffer> {
+	return new Uint8Array(bytes(value));
+}
+
 export function concat(
 	...parts: readonly Uint8Array[]
 ): Uint8Array<ArrayBuffer> {
@@ -86,7 +94,9 @@ export class Reader {
 		) {
 			throw new DAPError("InvalidMessage", "Truncated message");
 		}
-		const result = this.input.slice(this.#offset, this.#offset + length);
+		const result = copy(
+			this.input.subarray(this.#offset, this.#offset + length),
+		);
 		this.#offset += length;
 		return result;
 	}

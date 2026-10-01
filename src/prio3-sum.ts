@@ -52,7 +52,7 @@ export function shardSumWithRandomness(
 	let wireLength = 1;
 	while (wireLength <= meas.length) wireLength *= 2;
 	const proofLength = 2 * wireLength;
-	const helper = rand.slice(0, 32);
+	const helper = new Uint8Array(rand.subarray(0, 32));
 	const helperMeas = expand(helper, ctx, 1, Uint8Array.of(1), meas.length, 2);
 	const helperProof = expand(
 		helper,

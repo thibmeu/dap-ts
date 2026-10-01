@@ -167,7 +167,7 @@ export class Collector<V extends Vdaf = Vdaf> {
 		return interval;
 	}
 
-	#request(interval: { start: number; end: number }): Uint8Array {
+	#request(interval: { start: number; end: number }): Uint8Array<ArrayBuffer> {
 		const start = toTime(this.task, interval.start);
 		return encodeCollectionJobRequest(
 			start,

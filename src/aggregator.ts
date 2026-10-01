@@ -11,6 +11,7 @@ import {
 	bytes,
 	concat,
 	concatParts,
+	copy,
 	decodeId,
 	Reader,
 	uint,
@@ -185,7 +186,10 @@ function leaderCountInit(
 		publicShare,
 		inputShare,
 	);
-	return { state: inputShare.slice(0, 8), outbound: pingPong(0, share) };
+	return {
+		state: copy(inputShare.subarray(0, 8)),
+		outbound: pingPong(0, share),
+	};
 }
 
 /** Verify the leader's Count share and produce the helper's output share. */
@@ -271,6 +275,15 @@ export interface VerifyKey {
 	/** The 32-byte VDAF verification key shared by both Aggregators. */
 	readonly key: Uint8Array;
 }
+interface Loaded {
+	readonly options: AggregatorOptions;
+	readonly keys: ReadonlyMap<number, CryptoKeyPair>;
+	readonly configs: HpkeConfigList;
+	readonly collector:
+		| { readonly id: number; readonly key: CryptoKey }
+		| undefined;
+}
+
 export interface AggregatorOptions {
 	/**
 	 * Every HPKE key this Aggregator accepts, most preferred first. Keep
@@ -380,7 +393,7 @@ abstract class Aggregator<V extends Vdaf> {
 	#keys: ReadonlyMap<number, CryptoKeyPair>;
 	#verifyKeys: ReadonlyMap<number, Uint8Array>;
 	#firstVerifyKey: number;
-	#collector: HpkeConfig | undefined;
+	#collector: { id: number; key: CryptoKey } | undefined;
 	#maxSkew: number;
 	#clock: () => number;
 	#role: "leader" | "helper";
@@ -391,9 +404,7 @@ abstract class Aggregator<V extends Vdaf> {
 	protected constructor(
 		role: "leader" | "helper",
 		task: Task<V>,
-		options: AggregatorOptions,
-		keys: ReadonlyMap<number, CryptoKeyPair>,
-		hpkeConfigs: HpkeConfigList,
+		{ options, keys, configs: hpkeConfigs, collector }: Loaded,
 	) {
 		this.#role = role;
 		this.#taskId = decodeId(task.id, 32);
@@ -406,10 +417,10 @@ abstract class Aggregator<V extends Vdaf> {
 		this.#keys = keys;
 		this.hpkeConfigs = hpkeConfigs;
 		this.#verifyKeys = new Map(
-			options.verifyKeys.map(({ id, key }) => [id, bytes(key, 32).slice()]),
+			options.verifyKeys.map(({ id, key }) => [id, key]),
 		);
 		this.#firstVerifyKey = options.verifyKeys[0]!.id;
-		this.#collector = options.collector;
+		this.#collector = collector;
 		this.#maxSkew = options.maxSkewSeconds ?? DEFAULT_MAX_SKEW_SECONDS;
 		this.#clock = options.clock ?? Date.now;
 	}
@@ -418,7 +429,7 @@ abstract class Aggregator<V extends Vdaf> {
 	protected static async load(
 		task: Task,
 		options: AggregatorOptions,
-	): Promise<{ keys: Map<number, CryptoKeyPair>; configs: HpkeConfigList }> {
+	): Promise<Loaded> {
 		if (!(task instanceof Task) || task.dapVersion !== 19)
 			throw new DAPError("InvalidTask", "Expected a DAP 19 task");
 		const ids = (list: readonly { readonly id: number }[] | undefined) => {
@@ -447,6 +458,17 @@ abstract class Aggregator<V extends Vdaf> {
 				"Unsupported collector HPKE configuration",
 			);
 		if (collector) uint(collector.id, 1);
+		// Snapshot before the first await: callers may wipe or reuse their
+		// buffers, and verification keys must stay fixed for the task.
+		const snapshot: AggregatorOptions = {
+			...options,
+			verifyKeys: options.verifyKeys.map(({ id, key }) => ({
+				id,
+				key: copy(key),
+			})),
+		};
+		const collectorId = collector?.id;
+		const collectorKey = collector && copy(collector.publicKey);
 		const keys = new Map<number, CryptoKeyPair>();
 		const configs: HpkeConfig[] = [];
 		for (const { configId, privateKey } of options.hpkeKeys) {
@@ -455,8 +477,13 @@ abstract class Aggregator<V extends Vdaf> {
 			configs.push({ id: configId, kemId: 32, kdfId: 1, aeadId: 1, publicKey });
 		}
 		return {
+			options: snapshot,
 			keys,
 			configs: HpkeConfigList.parse(encodeHpkeConfigList(configs)),
+			collector: collectorKey && {
+				id: collectorId!,
+				key: await suite.DeserializePublicKey(collectorKey),
+			},
 		};
 	}
 
@@ -468,9 +495,9 @@ abstract class Aggregator<V extends Vdaf> {
 		// Patch the fields in place: this runs once per committed report.
 		const length = shareLength(this.task.vdaf);
 		const out = bucket
-			? bytes(bucket, length + 56).slice()
+			? copy(bytes(bucket, length + 56))
 			: this.#writeBucket(this.#readBucket(undefined));
-		const view = new DataView(out.buffer);
+		const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
 		const time = toTime(this.task, report.time);
 		const digest = sha256(decodeId(report.id, 16));
 		out.set(
@@ -667,21 +694,17 @@ abstract class Aggregator<V extends Vdaf> {
 		const collector = this.#collector;
 		if (!collector)
 			throw new DAPError("InvalidTask", "No collector HPKE configuration");
-		const sealed = await suite.Seal(
-			await suite.DeserializePublicKey(collector.publicKey),
-			share,
-			{
-				info: concat(
-					new TextEncoder().encode("dap-19 aggregate share"),
-					Uint8Array.of(this.#role === "leader" ? 2 : 3, 0),
-				),
-				aad: concat(
-					decodeId(this.task.id, 32),
-					this.task.encodeConfiguration(),
-					collectionRequest,
-				),
-			},
-		);
+		const sealed = await suite.Seal(collector.key, share, {
+			info: concat(
+				new TextEncoder().encode("dap-19 aggregate share"),
+				Uint8Array.of(this.#role === "leader" ? 2 : 3, 0),
+			),
+			aad: concat(
+				decodeId(this.task.id, 32),
+				this.task.encodeConfiguration(),
+				collectionRequest,
+			),
+		});
 		return {
 			configId: collector.id,
 			enc: sealed.encapsulatedSecret,
@@ -703,13 +726,8 @@ function reject(id: Uint8Array, error: ReportError): Uint8Array {
 }
 
 export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
-	private constructor(
-		task: Task<V>,
-		options: AggregatorOptions,
-		keys: ReadonlyMap<number, CryptoKeyPair>,
-		configs: HpkeConfigList,
-	) {
-		super("leader", task, options, keys, configs);
+	private constructor(task: Task<V>, loaded: Loaded) {
+		super("leader", task, loaded);
 		Object.freeze(this);
 	}
 
@@ -717,8 +735,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 		task: Task<V>,
 		options: AggregatorOptions,
 	): Promise<Leader<V>> {
-		const { keys, configs } = await Aggregator.load(task, options);
-		return new Leader(task, options, keys, configs);
+		return new Leader(task, await Aggregator.load(task, options));
 	}
 
 	/**
@@ -928,7 +945,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	 * then merges them.
 	 */
 	collection(body: Uint8Array): CollectionJob {
-		const request = bytes(body).slice();
+		const request = copy(body);
 		const query = decodeCollectionJobRequest(request);
 		const interval = this.interval(query.start, query.duration);
 		return Object.freeze({
@@ -967,13 +984,8 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 }
 
 export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
-	private constructor(
-		task: Task<V>,
-		options: AggregatorOptions,
-		keys: ReadonlyMap<number, CryptoKeyPair>,
-		configs: HpkeConfigList,
-	) {
-		super("helper", task, options, keys, configs);
+	private constructor(task: Task<V>, loaded: Loaded) {
+		super("helper", task, loaded);
 		Object.freeze(this);
 	}
 
@@ -981,8 +993,7 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 		task: Task<V>,
 		options: AggregatorOptions,
 	): Promise<Helper<V>> {
-		const { keys, configs } = await Aggregator.load(task, options);
-		return new Helper(task, options, keys, configs);
+		return new Helper(task, await Aggregator.load(task, options));
 	}
 
 	/**
@@ -1255,12 +1266,12 @@ export function leaderPrio3Finish(
 	if (vdaf.type === "prio3-sum") {
 		bytes(state, 8);
 		readPingPong(inbound, 2, 0);
-		return state.slice();
+		return copy(state);
 	}
 	const length = vdaf.length * 16;
 	bytes(state, length + 32);
 	const message = readPingPong(inbound, 2, 32);
 	if (!message.every((byte, i) => byte === state[length + i]))
 		throw new RangeError("Prio3Histogram joint randomness mismatch");
-	return state.slice(0, length);
+	return copy(state.subarray(0, length));
 }

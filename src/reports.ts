@@ -47,20 +47,22 @@ export interface PreparedReport {
 
 const reports = new WeakMap<
 	PreparedReport,
-	{ task: string; bytes: Uint8Array }
+	{ task: string; bytes: Uint8Array<ArrayBuffer> }
 >();
 
 export function preparedReport(
 	id: ReportId,
 	time: number,
 	task: string,
-	bytes: Uint8Array,
+	bytes: Uint8Array<ArrayBuffer>,
 ): PreparedReport {
 	const report = Object.freeze({ id, time }) as PreparedReport;
-	reports.set(report, { task, bytes: bytes.slice() });
+	// Adopts bytes: callers pass a fresh encoding they never retain.
+	reports.set(report, { task, bytes });
 	return report;
 }
 
+/** @internal The stored encoding, borrowed. Copy before exposing it. */
 export function reportBytes(
 	report: PreparedReport,
 	task?: string,
@@ -69,7 +71,7 @@ export function reportBytes(
 	if (!stored || (task !== undefined && stored.task !== task)) {
 		throw new DAPError("InvalidReport", "Report does not belong to this task");
 	}
-	return stored.bytes.slice();
+	return stored.bytes;
 }
 
 export function isPreparedReport(value: object): value is PreparedReport {

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
 	DAPError,
@@ -184,6 +185,11 @@ it("matches a hand-derived report and concatenates reports without a bulk prefix
 	};
 	expect(encodeReport(report)).toEqual(encoded);
 	expect(decodeReport(encoded)).toEqual(report);
+	// Decoded fields are copies, even from a Buffer whose slice() aliases.
+	const buffer = Buffer.from(encoded);
+	const decoded = decodeReport(buffer);
+	buffer.fill(0);
+	expect(decoded).toEqual(report);
 	expect(encodeUploadRequest([report, encoded])).toEqual(
 		new Uint8Array([...encoded, ...encoded]),
 	);
@@ -195,6 +201,17 @@ it("matches a hand-derived report and concatenates reports without a bulk prefix
 	for (let i = 0; i < encoded.length; i++)
 		expect(() => decodeReport(encoded.slice(0, i))).toThrow();
 	expect(() => decodeReport(new Uint8Array([...encoded, 0]))).toThrow();
+});
+
+it("owns its bytes when given Node Buffers, whose slice() aliases", () => {
+	const encoded = Buffer.from(encodeHpkeConfigList([config]));
+	const list = HpkeConfigList.parse(encoded);
+	encoded.fill(0);
+	expect(list.configs[0]!.publicKey).toEqual(config.publicKey);
+	const configuration = Buffer.from(taskWire);
+	const decoded = Task.decode({ id: task.id, configuration });
+	configuration.fill(0);
+	expect(decoded.encodeConfiguration()).toEqual(taskWire);
 });
 
 it("decodes 17-byte upload failures including future error codes", () => {

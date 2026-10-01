@@ -1,4 +1,4 @@
-import { base64url, bytes, decodeId, Reader } from "./binary.js";
+import { base64url, bytes, copy, decodeId, Reader } from "./binary.js";
 import { DAPError } from "./errors.js";
 import {
 	type DecodeOptions,
@@ -130,8 +130,8 @@ export class Task<V extends Vdaf = Vdaf> {
 			this.#interval = { start, end: start + duration };
 		}
 		this.vdaf = vdaf as V;
-		this.#info = configuration.info.slice();
-		this.#configuration = encoded.slice();
+		this.#info = copy(configuration.info);
+		this.#configuration = copy(encoded);
 		Object.freeze(this);
 	}
 
@@ -188,7 +188,8 @@ export class Task<V extends Vdaf = Vdaf> {
 
 	/** Read a provisioned task. Narrow its VDAF with `expect()`. */
 	static decode(input: EncodedTask, options?: DecodeOptions): Task {
-		const encoded = bytes(input.configuration).slice();
+		// Parsed and copied synchronously, so the caller cannot swap bytes midway.
+		const encoded = bytes(input.configuration);
 		return new Task(
 			input.id,
 			encoded,
@@ -203,10 +204,10 @@ export class Task<V extends Vdaf = Vdaf> {
 	}
 
 	get info(): Uint8Array<ArrayBuffer> {
-		return this.#info.slice();
+		return copy(this.#info);
 	}
 	encodeConfiguration(): Uint8Array<ArrayBuffer> {
-		return this.#configuration.slice();
+		return copy(this.#configuration);
 	}
 
 	/** @internal Whether a time in DAP time-precision units is in the task interval. */
