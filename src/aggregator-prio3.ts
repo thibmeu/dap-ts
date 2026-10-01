@@ -1,7 +1,10 @@
-import { concat } from "./binary.js";
+import { concat, copy } from "./binary.js";
 import { fieldMod, fieldPower, rootOfUnity, sizeInverse } from "./field.js";
 import { expand, P, requireBytes, xof } from "./prio3-count.js";
 import { P128 } from "./prio3-histogram.js";
+
+// 1/SHARES in Field128, with two shares.
+const INVERSE_SHARES = (P128 + 1n) / 2n;
 
 function elements(
 	input: Uint8Array,
@@ -256,7 +259,7 @@ export function histogramVerifierShare(
 		7,
 		concat(Uint8Array.of(aggregatorId), nonce, encode(meas, 16)),
 	);
-	const jointParts = publicShare.slice();
+	const jointParts = copy(publicShare);
 	jointParts.set(part, aggregatorId * 32);
 	const jointSeed = seed(new Uint8Array(32), context, 6, jointParts);
 	const joint = expand(
@@ -281,31 +284,38 @@ export function histogramVerifierShare(
 	) as [bigint, bigint, bigint];
 	if (fieldPower(point, BigInt(p), P128) === 1n)
 		throw new RangeError("Invalid query point");
-	const inverseShares = fieldPower(2n, P128 - 2n, P128);
-	const wires = proof
+	const wireWeights = lagrangeWeights(p, point, P128);
+	// Each wire polynomial is evaluated as a dot product with the Lagrange
+	// weights; accumulating directly avoids building the wire matrix.
+	const checks = proof
 		.slice(0, arity)
-		.map((value) => [value, ...Array<bigint>(p - 1).fill(0n)]);
+		.map((seed) => fieldMod(seed * wireWeights[0]!, P128));
 	let rangeCheck = 0n;
 	for (let i = 0; i < calls; i++) {
+		const weight = wireWeights[i + 1]!;
 		let power = joint[i]!;
 		for (let j = 0; j < chunkLength; j++) {
 			const value = meas[i * chunkLength + j] ?? 0n;
-			wires[2 * j]![i + 1] = fieldMod(power * value, P128);
-			wires[2 * j + 1]![i + 1] = fieldMod(value - inverseShares, P128);
+			checks[2 * j] = fieldMod(
+				checks[2 * j]! + fieldMod(power * value, P128) * weight,
+				P128,
+			);
+			checks[2 * j + 1] = fieldMod(
+				checks[2 * j + 1]! + (value - INVERSE_SHARES) * weight,
+				P128,
+			);
 			power = fieldMod(power * joint[i]!, P128);
 		}
 		rangeCheck = fieldMod(rangeCheck + proof[arity + 2 * (i + 1)]!, P128);
 	}
 	const sumCheck = fieldMod(
-		meas.reduce((sum, value) => sum + value, 0n) - inverseShares,
+		meas.reduce((sum, value) => sum + value, 0n) - INVERSE_SHARES,
 		P128,
 	);
 	const validity = fieldMod(
 		reduceRange * rangeCheck + reduceSum * sumCheck,
 		P128,
 	);
-	const wireWeights = lagrangeWeights(p, point, P128);
-	const checks = wires.map((wire) => polynomial(wire, wireWeights, P128));
 	const gadgetCheck = polynomial(
 		gadget(proof.slice(arity), P128),
 		lagrangeWeights(2 * p, point, P128),

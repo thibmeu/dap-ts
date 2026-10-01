@@ -79,7 +79,7 @@ export function shardHistogramWithRandomness(
 	while (wireLength <= calls) wireLength *= 2;
 	const arity = 2 * chunkLength;
 	const proofLength = arity + 2 * wireLength - 1;
-	const helper = rand.slice(0, 32);
+	const helper = new Uint8Array(rand.subarray(0, 32));
 	const helperBlind = rand.subarray(32, 64);
 	const leaderBlind = rand.subarray(64, 96);
 	const proveSeed = rand.subarray(96);

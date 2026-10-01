@@ -69,7 +69,11 @@ export function transform(
 		const root = rootOfUnity(width, modulus);
 		// root has order width, so its inverse is root^(width-1): a far shorter
 		// exponent than the generic root^(modulus-2).
-		const step = inverse ? fieldPower(root, BigInt(width - 1), modulus) : root;
+		const step = inverse
+			? cached("iroot", width, modulus, () =>
+					fieldPower(root, BigInt(width - 1), modulus),
+				)
+			: root;
 		for (let start = 0; start < size; start += width) {
 			let factor = 1n;
 			for (let j = 0; j < width / 2; j++) {

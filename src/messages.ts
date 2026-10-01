@@ -390,7 +390,7 @@ function encodeCiphertext(ciphertext: HpkeCiphertext): Uint8Array<ArrayBuffer> {
 export function encodeReport(
 	report: Report | PreparedReport,
 ): Uint8Array<ArrayBuffer> {
-	if (isPreparedReport(report)) return reportBytes(report);
+	if (isPreparedReport(report)) return new Uint8Array(reportBytes(report));
 	return concat(
 		encodeReportMetadata(report.metadata),
 		vector(report.publicShare, 4),

@@ -44,7 +44,7 @@ export function expand(
 	length: number,
 	vdafId = 1,
 	modulus = P,
-	fieldWidth = 8,
+	fieldWidth: 8 | 16 = 8,
 ): bigint[] {
 	// Draft 20 retains VERSION=18. Class=0; the VDAF ID separates variants.
 	const dst = new Uint8Array(8 + ctx.length);
@@ -57,13 +57,10 @@ export function expand(
 	try {
 		while (elements.length < length) {
 			stream.xofInto(bytes);
-			let value: bigint;
-			if (fieldWidth === 8) value = view.getBigUint64(0, true);
-			else {
-				value = 0n;
-				for (let i = fieldWidth - 1; i >= 0; i--)
-					value = (value << 8n) | BigInt(bytes[i]!);
-			}
+			const value =
+				fieldWidth === 8
+					? view.getBigUint64(0, true)
+					: view.getBigUint64(0, true) | (view.getBigUint64(8, true) << 64n);
 			if (value < modulus) elements.push(value);
 		}
 		return elements;
@@ -86,7 +83,7 @@ export function shardCountWithRandomness(
 	requireBytes(rand, 64);
 	if (ctx.length > 65527) throw new RangeError("Context is too long");
 
-	const helper = rand.slice(0, 32);
+	const helper = new Uint8Array(rand.subarray(0, 32));
 	const [helperMeasurement] = expand(helper, ctx, 1, Uint8Array.of(1), 1);
 	const helperProof = expand(helper, ctx, 2, Uint8Array.of(1, 1), 5);
 	const [a, b] = expand(rand.subarray(32), ctx, 4, Uint8Array.of(1), 2);

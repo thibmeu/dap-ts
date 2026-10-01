@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { CipherSuite } from "hpke";
 import { expect, it, vi } from "vitest";
 import {
@@ -393,19 +394,28 @@ it("honours the clock and skew allowance", async () => {
 
 it("collects merged buckets end to end", async () => {
 	const keys = await collectorKeys();
+	// Buffer.slice() aliases, and callers may wipe or reuse key buffers after
+	// create(): each role must own its keys, and buckets may be offset views.
+	const leaderKey = Buffer.alloc(32, 1);
+	const collectorKey = Buffer.from(keys.config.publicKey);
+	const view = (bucket: Uint8Array) =>
+		Buffer.concat([Buffer.alloc(3, 0xaa), bucket]).subarray(3);
 	const options = {
-		verifyKeys,
 		clock: () => 10_000_000,
-		collector: keys.config,
+		collector: { ...keys.config, publicKey: collectorKey },
 	};
 	const leader = await Leader.create(task, {
 		...options,
+		verifyKeys: [{ id: 0, key: leaderKey }],
 		hpkeKeys: [{ configId: 7, privateKey }],
 	});
 	const helper = await Helper.create(task, {
 		...options,
+		verifyKeys: [{ id: 0, key: Buffer.alloc(32, 1) }],
 		hpkeKeys: [{ configId: 8, privateKey }],
 	});
+	leaderKey.fill(0);
+	collectorKey.fill(0);
 	const c = await Client.create(task, { hpke });
 	// Reports in minutes 2 and 4 of a three-bucket query; minute 3 is empty.
 	const reports = [
@@ -416,6 +426,8 @@ it("collects merged buckets end to end", async () => {
 	].map(encodeReport);
 	const job = await leader.prepare(reports);
 	const verified = await helper.verify(job.request!);
+	// The Leader's wiped key buffer must not change its verification key.
+	expect(verified.reports.filter((report) => "error" in report)).toEqual([]);
 	const buckets = {
 		leader: new Map<number, Uint8Array>(),
 		helper: new Map<number, Uint8Array>(),
@@ -423,12 +435,16 @@ it("collects merged buckets end to end", async () => {
 	for (const report of verified.reports)
 		buckets.helper.set(
 			report.time,
-			helper.addToBucket(buckets.helper.get(report.time), report as never),
+			view(
+				helper.addToBucket(buckets.helper.get(report.time), report as never),
+			),
 		);
 	for (const report of leader.finish(job.state, verified.seal()))
 		buckets.leader.set(
 			report.time,
-			leader.addToBucket(buckets.leader.get(report.time), report as never),
+			view(
+				leader.addToBucket(buckets.leader.get(report.time), report as never),
+			),
 		);
 	expect(leader.bucketReportCount(buckets.leader.get(240_000)!)).toBe(52);
 
@@ -457,7 +473,8 @@ it("collects merged buckets end to end", async () => {
 	const share = helper.aggregateShare(shareRequest);
 	expect(share.interval).toEqual(collection.interval);
 	// A Helper that saw a different batch refuses with batchMismatch.
-	const helperBucket = merge(helper, buckets.helper, share.interval);
+	// Adding to a bucket must not change the caller's input bytes.
+	const helperBucket = view(merge(helper, buckets.helper, share.interval));
 	await expect(
 		share.finish(
 			helper.addToBucket(helperBucket, verified.reports[0] as never),

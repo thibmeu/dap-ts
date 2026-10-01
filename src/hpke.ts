@@ -4,7 +4,7 @@ import {
 	KDF_HKDF_SHA256,
 	KEM_DHKEM_X25519_HKDF_SHA256,
 } from "hpke";
-import { bytes } from "./binary.js";
+import { bytes, copy } from "./binary.js";
 import { DAPError } from "./errors.js";
 import { decodeHpkeConfigList, type HpkeConfig } from "./messages.js";
 
@@ -14,7 +14,7 @@ export const secureRandom: RandomSource = (length) =>
 	crypto.getRandomValues(new Uint8Array(length));
 
 export function randomBytes(source: RandomSource, length: number): Uint8Array {
-	return bytes(source(length), length).slice();
+	return copy(bytes(source(length), length));
 }
 
 export function createSuite(random?: RandomSource): CipherSuite<CryptoKey> {
@@ -74,8 +74,8 @@ export async function prepareRecipientKey(
 export class HpkeConfigList {
 	#encoded: Uint8Array;
 	private constructor(encoded: Uint8Array) {
-		decodeHpkeConfigList(encoded);
-		this.#encoded = encoded.slice();
+		this.#encoded = copy(encoded);
+		decodeHpkeConfigList(this.#encoded);
 		Object.freeze(this);
 	}
 	static parse(encoded: Uint8Array): HpkeConfigList {
@@ -85,7 +85,7 @@ export class HpkeConfigList {
 		return decodeHpkeConfigList(this.#encoded);
 	}
 	encode(): Uint8Array<ArrayBuffer> {
-		return this.#encoded.slice();
+		return copy(this.#encoded);
 	}
 }
 

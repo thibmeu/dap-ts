@@ -1,4 +1,4 @@
-import { base64url, bytes, concat, concatParts, decodeId } from "./binary.js";
+import { base64url, concat, concatParts, copy, decodeId } from "./binary.js";
 import { DAPError, type DAPProblem } from "./errors.js";
 import {
 	type AggregatorHpkeConfigs,
@@ -78,14 +78,15 @@ export function dapRequest(
 	url: string,
 	method: "GET" | "POST",
 	headers: Record<string, string>,
-	body?: Uint8Array,
+	body?: Uint8Array<ArrayBuffer>,
 ): Request {
 	return new Request(url, {
 		method,
 		headers,
 		redirect: "manual",
 		credentials: "omit",
-		...(body ? { body: body.slice() } : {}),
+		// Request extracts (copies) a BufferSource body, so no copy here.
+		...(body ? { body } : {}),
 	});
 }
 
@@ -355,7 +356,7 @@ export class Client<V extends Vdaf = Vdaf> {
 		const copyExtensions = (extensions: readonly Extension[]) =>
 			extensions.map((extension) => ({
 				type: extension.type,
-				data: bytes(extension.data).slice(),
+				data: copy(extension.data),
 			}));
 		const publicExtensions = copyExtensions(options.publicExtensions ?? []);
 		const privateExtensions = [
