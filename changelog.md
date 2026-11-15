@@ -2,6 +2,12 @@
 
 Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Changed
+
+- Update hpke to 1.1.8.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added

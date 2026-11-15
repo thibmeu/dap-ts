@@ -559,7 +559,9 @@ abstract class Aggregator<V extends Vdaf> {
 				),
 				count: result.count + next.count,
 				checksum: result.checksum.map((byte, i) => byte ^ next.checksum[i]!),
+				// biome-ignore lint/complexity/useMathMinMax: Math.min rejects bigint
 				first: next.first < result.first ? next.first : result.first,
+				// biome-ignore lint/complexity/useMathMinMax: Math.max rejects bigint
 				last: next.last > result.last ? next.last : result.last,
 			};
 		}

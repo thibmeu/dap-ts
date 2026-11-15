@@ -52,12 +52,12 @@
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
-    "hpke": "1.1.4"
+    "hpke": "1.1.8"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.13",
-    "@types/node": "26.6.3",
+    "@biomejs/biome": "2.6.6",
+    "@types/node": "26.6.6",
     "typescript": "7.0.2",
-    "vitest": "5.0.1"
+    "vitest": "5.1.0"
   }
 }
