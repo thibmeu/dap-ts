@@ -185,7 +185,7 @@ export function decodeAggregateShareRequest(input: Uint8Array): {
 	const reportCount = reader.u64();
 	const checksum = reader.take(32);
 	reader.end();
-	// DAP 19, 5.1.2: the selected interval must lie within the query.
+	// DAP 20, 5.1.2: the selected interval must lie within the query.
 	if (
 		selectedDuration === 0n ||
 		selectedStart < start ||
@@ -461,7 +461,7 @@ export function decodeUploadErrors(
 	return result;
 }
 
-/** Encode UploadErrors (DAP 19, 4.4.2.2) in the order given. */
+/** Encode UploadErrors (DAP 20, 4.4.2.2) in the order given. */
 export function encodeUploadErrors(
 	errors: readonly { readonly id: string; readonly error: ReportError }[],
 ): Uint8Array<ArrayBuffer> {

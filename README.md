@@ -3,14 +3,14 @@
 [![NPM](https://img.shields.io/npm/v/@thibmeu/dap?style=flat-square)](https://www.npmjs.com/package/@thibmeu/dap)
 [![License](https://img.shields.io/npm/l/@thibmeu/dap?style=flat-square)](LICENSE)
 
-TypeScript implementation of the Distributed Aggregation Protocol (DAP), as specified in [draft-ietf-ppm-dap-19](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html).
+TypeScript implementation of the Distributed Aggregation Protocol (DAP), as specified in [draft-ietf-ppm-dap-20](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-20.html).
 Clients encrypt measurements, two aggregators verify and sum them without
 seeing any single value, and a collector gets only the aggregate.
 
 ## Features
 
-- **[DAP draft 19](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html)**: all four roles: Client, Leader, Helper, and Collector
-- **[VDAF draft 20](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-20.html)**: Prio3Count, Prio3Sum, and Prio3Histogram, checked against the published vectors
+- **[DAP draft 20](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-20.html)**: all four roles: Client, Leader, Helper, and Collector
+- **[VDAF draft 22](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-22.html)**: Prio3Count, Prio3Sum, and Prio3Histogram, checked against the published vectors
 - **Web APIs**: runs in browsers, Web Workers, Cloudflare Workers, and Node.js
 - **Bring your own I/O**: Client and Collector build Web `Request` objects and read `Response` objects; aggregators take and return bytes. HTTP, authentication, and storage stay with you
 
@@ -141,7 +141,10 @@ with `mergeBuckets()`, then call the returned job's `finish()`.
 Your storage must enforce what the library cannot see: reject replayed reports
 and reports for collected batches, commit output shares together with the
 response bytes, answer retries from those bytes, and keep batches with pending
-jobs out of collection.
+jobs out of collection. A repeated collection request for the same query
+returns the existing job, even once it has completed, instead of failing with
+`batchOverlap`. Job and aggregate share IDs in URLs are opaque path segments
+that you choose.
 
 Serve each role's HPKE list from `role.hpkeConfigs`. List keys most preferred
 first and keep a retired key for twice the configuration's cache lifetime.
@@ -165,8 +168,8 @@ does not add differential privacy, and a small batch can reveal individual
 values: set `minBatchSize` accordingly.
 
 DAP hides what a client reported, not that it reported. The Leader sees each
-upload's source IP, arrival time, and task ID ([draft-ietf-ppm-dap-19, Section 8](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html#section-8)). If that is
-sensitive, send reports through an Oblivious HTTP relay ([Section 8.4](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-19.html#section-8.4)) or
+upload's source IP, arrival time, and task ID ([draft-ietf-ppm-dap-20, Section 8](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-20.html#section-8)). If that is
+sensitive, send reports through an Oblivious HTTP relay ([Section 8.4](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-20.html#section-8.4)) or
 report on a fixed schedule.
 
 ## License

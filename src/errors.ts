@@ -11,7 +11,7 @@ export type DAPErrorCode =
 	| "InvalidResponse"
 	| "HttpError";
 
-/** Problem types registered in DAP 19, Section 3.6. */
+/** Problem types registered in DAP 20, Section 3.6. */
 export type DAPProblemType =
 	| "invalidMessage"
 	| "unrecognizedTask"
@@ -25,7 +25,7 @@ export type DAPProblemType =
 	| "unsupportedExtension"
 	| "invalidExtension";
 
-/** RFC 9457 problem details returned with a DAP error response (DAP 19, 3.6). */
+/** RFC 9457 problem details returned with a DAP error response (DAP 20, 3.6). */
 export interface DAPProblem {
 	readonly type: string;
 	/**

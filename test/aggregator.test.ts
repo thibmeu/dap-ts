@@ -392,6 +392,24 @@ it("honours the clock and skew allowance", async () => {
 	await expect(roles({ maxSkewSeconds: -1 })).rejects.toThrow(DAPError);
 });
 
+it("owns HPKE private keys before its first await", async () => {
+	// The second key is imported after an await; wiping it then must not matter.
+	const key = Buffer.from(bytes(hpkeVector.skRm));
+	const pending = Leader.create(task, {
+		clock: () => 10_000_000,
+		verifyKeys: [{ id: 0, key: new Uint8Array(32) }],
+		hpkeKeys: [
+			{ configId: 6, privateKey: Buffer.alloc(32, 9) },
+			{ configId: 7, privateKey: key },
+		],
+	});
+	key.fill(0);
+	const leader = await pending;
+	const client = await Client.create(task, { hpke });
+	const report = await client.prepareReport(1, { time: 120_000 });
+	expect((await leader.prepare([encodeReport(report)])).rejected).toEqual([]);
+});
+
 it("collects merged buckets end to end", async () => {
 	const keys = await collectorKeys();
 	// Buffer.slice() aliases, and callers may wipe or reuse key buffers after

@@ -24,7 +24,7 @@ import {
 	reportBytes,
 	reportErrors,
 } from "./reports.js";
-import { Task, toMs, toTime } from "./task.js";
+import { DAP_VERSION, Task, toMs, toTime } from "./task.js";
 import {
 	type Measurement,
 	randomLength,
@@ -123,7 +123,7 @@ export async function readBody(
 export function checkMediaType(
 	contentType: string | null | undefined,
 	message: string,
-	version: 18 | 19 = 19,
+	version: 18 | typeof DAP_VERSION = DAP_VERSION,
 ): void {
 	const [type, ...parts] = (contentType ?? "").split(";");
 	const parameters = new Map<string, string>();
@@ -148,7 +148,7 @@ export function checkMediaType(
 export function checkResponseType(
 	response: Response,
 	message: string,
-	version: 18 | 19 = 19,
+	version: 18 | typeof DAP_VERSION = DAP_VERSION,
 ): void {
 	try {
 		checkMediaType(response.headers.get("content-type"), message, version);
@@ -161,7 +161,7 @@ export function checkResponseType(
 
 const DAP_ERROR_URN = "urn:ietf:params:ppm:dap:error:";
 
-/** Read an RFC 9457 problem detail document from an error body (DAP 19, 3.6). */
+/** Read an RFC 9457 problem detail document from an error body (DAP 20, 3.6). */
 function parseProblem(
 	contentType: string,
 	body: Uint8Array,
@@ -353,11 +353,15 @@ export class Client<V extends Vdaf = Vdaf> {
 				"InvalidReport",
 				"Report time is outside the task interval",
 			);
+		// Aggregators reject extensions not in strictly increasing type order
+		// (DAP 20, 4.5.3.4), so sort them here; duplicates still throw.
 		const copyExtensions = (extensions: readonly Extension[]) =>
-			extensions.map((extension) => ({
-				type: extension.type,
-				data: copy(extension.data),
-			}));
+			extensions
+				.map((extension) => ({
+					type: extension.type,
+					data: copy(extension.data),
+				}))
+				.sort((a, b) => a.type - b.type);
 		const publicExtensions = copyExtensions(options.publicExtensions ?? []);
 		const privateExtensions = [
 			copyExtensions(options.privateExtensions?.leader ?? []),

@@ -13,7 +13,7 @@ import {
 	decodeCollectionJobResponse,
 	encodeCollectionJobRequest,
 } from "./messages.js";
-import { Task, toMs, toTime } from "./task.js";
+import { DAP_VERSION, Task, toMs, toTime } from "./task.js";
 import { type AggregateResult, unshard, type Vdaf } from "./vdaf.js";
 
 /** A batch interval. Both ends must fall on the task's time precision. */
@@ -100,8 +100,11 @@ export class Collector<V extends Vdaf = Vdaf> {
 		task: Task<V>,
 		options: CollectorOptions,
 	): Promise<Collector<V>> {
-		if (!(task instanceof Task) || task.dapVersion !== 19)
-			throw new DAPError("InvalidTask", "Collector requires a DAP 19 task");
+		if (!(task instanceof Task) || task.dapVersion !== DAP_VERSION)
+			throw new DAPError(
+				"InvalidTask",
+				`Collector requires a DAP ${DAP_VERSION} task`,
+			);
 		if (
 			!Number.isInteger(options.configId) ||
 			options.configId < 0 ||
@@ -184,7 +187,7 @@ export class Collector<V extends Vdaf = Vdaf> {
 		} catch {
 			throw new DAPError("InvalidResponse", "Invalid collection job location");
 		}
-		// DAP 19, 3.2 lets the Leader choose the job identifier and its shape,
+		// DAP 20, 3.2 lets the Leader choose the job identifier and its shape,
 		// so only require that the job stays on the Leader's origin and carries
 		// no credentials or fragment.
 		if (
@@ -269,7 +272,7 @@ export class Collector<V extends Vdaf = Vdaf> {
 					"Unexpected collector HPKE configuration",
 				);
 			const info = concat(
-				new TextEncoder().encode("dap-19 aggregate share"),
+				new TextEncoder().encode(`dap-${DAP_VERSION} aggregate share`),
 				Uint8Array.of(index + 2, 0),
 			);
 			try {

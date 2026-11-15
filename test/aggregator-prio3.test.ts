@@ -183,7 +183,7 @@ for (const [name, vdaf, values, result] of [
 	["Sum", prio3Sum(255), [100, 11], 111n],
 	["Histogram", prio3Histogram(4, 2), [2, 1], [0n, 1n, 1n, 0n]],
 ] as const) {
-	it(`${name}: verifies encrypted reports through a mixed DAP 19 batch`, async () => {
+	it(`${name}: verifies encrypted reports through a mixed DAP 20 batch`, async () => {
 		const task = Task.create({ ...taskOptions, minBatchSize: 2, vdaf });
 		const client = await Client.create(task, {
 			hpke,

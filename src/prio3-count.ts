@@ -1,6 +1,6 @@
 import { turboshake128 } from "@noble/hashes/sha3-addons.js";
 
-// VDAF draft 20, Sections 6.1.4 and 7.4.1.
+// VDAF draft 22, Sections 6.1.4 and 7.4.1.
 export const P = 0xffff_ffff_0000_0001n;
 const HALF = (P + 1n) / 2n;
 // 7^((P - 1) / 4) mod P, the specified principal fourth root of unity.
@@ -46,7 +46,7 @@ export function expand(
 	modulus = P,
 	fieldWidth: 8 | 16 = 8,
 ): bigint[] {
-	// Draft 20 retains VERSION=18. Class=0; the VDAF ID separates variants.
+	// Drafts 20 to 22 retain VERSION=18. Class=0; the VDAF ID separates variants.
 	const dst = new Uint8Array(8 + ctx.length);
 	dst.set([18, 0, 0, 0, 0, vdafId, 0, usage]);
 	dst.set(ctx, 8);

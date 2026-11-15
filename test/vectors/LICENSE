@@ -7,7 +7,8 @@ Prio3Count_bad_meas_share.json, Prio3Count_bad_wire_seed.json,
 and XofTurboShake128.json are from the CFRG VDAF specification
 repository at commit 5203892540a95e564dfa978345d16b40baf3c65d.
 Source: https://github.com/cfrg/draft-irtf-cfrg-vdaf/tree/5203892540a95e564dfa978345d16b40baf3c65d/test_vec
-Tag: draft-irtf-cfrg-vdaf-20. The JSON files are unchanged.
+Tag: draft-irtf-cfrg-vdaf-20. The JSON files are unchanged, and identical
+at tag draft-irtf-cfrg-vdaf-22 (commit e1d1e1c3854a34589c0c2d9b899a48533cac9004).
 
 hpke-rfc9180-a1.json contains the base-mode, sequence-zero test values from
 RFC 9180 Appendix A.1.1: https://www.rfc-editor.org/rfc/rfc9180.html#appendix-A.1.1

@@ -15,6 +15,9 @@ import {
 	type Vdaf,
 } from "./vdaf.js";
 
+/** The DAP draft this package implements; it tags HPKE and VDAF contexts. */
+export const DAP_VERSION = 20;
+
 export interface TaskOptions<V extends Vdaf> {
 	readonly id: string;
 	readonly info?: string | Uint8Array;
@@ -84,8 +87,8 @@ export class Task<V extends Vdaf = Vdaf> {
 	readonly minBatchSize: number;
 	readonly batchMode = "time-interval" as const;
 	readonly vdaf: V;
-	/** @internal Test compatibility; production tasks always use DAP 19. */
-	readonly dapVersion: 18 | 19;
+	/** @internal Test compatibility; production tasks always use DAP_VERSION. */
+	readonly dapVersion: 18 | typeof DAP_VERSION;
 	#configuration: Uint8Array;
 	#info: Uint8Array;
 	#interval: { start: bigint; end: bigint } | undefined;
@@ -99,7 +102,7 @@ export class Task<V extends Vdaf = Vdaf> {
 		this.id = base64url(decodeId(id, 32));
 		this.leader = endpoint(configuration.leader, testOnly?.allowInsecureHttp);
 		this.helper = endpoint(configuration.helper, testOnly?.allowInsecureHttp);
-		this.dapVersion = testOnly?.dapVersion ?? 19;
+		this.dapVersion = testOnly?.dapVersion ?? DAP_VERSION;
 		this.timePrecision = positiveSafe(configuration.timePrecision);
 		this.minBatchSize = positiveSafe(configuration.minBatchSize);
 		if (configuration.batchMode !== 1 || configuration.batchConfig.length) {

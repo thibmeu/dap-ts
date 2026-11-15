@@ -1,7 +1,7 @@
 import { fieldMod, transform } from "./field.js";
 import { expand, requireBytes, xof } from "./prio3-count.js";
 
-// VDAF draft 20, Sections 6.1.4, 7.2, and 7.4.4.
+// VDAF draft 22, Sections 6.1.4, 7.2, and 7.4.4.
 export const P128 = (1n << 66n) * 4611686018427387897n + 1n;
 /** Check the one-hot histogram parameters this package supports. */
 export function checkHistogram(length: number, chunkLength: number): void {

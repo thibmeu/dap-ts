@@ -52,8 +52,27 @@ import type {
 	Helper as HelperRole,
 	Leader as LeaderRole,
 } from "./aggregator.js";
+import { copy } from "./binary.js";
 import type { Task } from "./task.js";
 import type { Vdaf } from "./vdaf.js";
+
+// Copy key bytes before the module import below awaits, so a caller may wipe
+// or reuse its buffers as soon as create() returns its promise.
+function own(options: AggregatorOptions): AggregatorOptions {
+	const { hpkeKeys, verifyKeys, collector } = options ?? {};
+	return {
+		...options,
+		hpkeKeys: Array.isArray(hpkeKeys)
+			? hpkeKeys.map((k) => ({ ...k, privateKey: copy(k.privateKey) }))
+			: hpkeKeys,
+		verifyKeys: Array.isArray(verifyKeys)
+			? verifyKeys.map((k) => ({ ...k, key: copy(k.key) }))
+			: verifyKeys,
+		...(collector
+			? { collector: { ...collector, publicKey: copy(collector.publicKey) } }
+			: {}),
+	};
+}
 
 // The aggregator roles load their module lazily so that a reporting-only
 // bundle does not pull in verification.
@@ -64,7 +83,8 @@ export const Leader = {
 		task: Task<V>,
 		options: AggregatorOptions,
 	): Promise<Leader<V>> {
-		return (await import("./aggregator.js")).Leader.create(task, options);
+		const owned = own(options);
+		return (await import("./aggregator.js")).Leader.create(task, owned);
 	},
 };
 export const Helper = {
@@ -72,6 +92,7 @@ export const Helper = {
 		task: Task<V>,
 		options: AggregatorOptions,
 	): Promise<Helper<V>> {
-		return (await import("./aggregator.js")).Helper.create(task, options);
+		const owned = own(options);
+		return (await import("./aggregator.js")).Helper.create(task, owned);
 	},
 };

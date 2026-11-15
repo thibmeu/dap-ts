@@ -80,7 +80,7 @@ export function sameVdaf(a: Vdaf, b: Vdaf): boolean {
 	return x.type === y.type && x.config.every((byte, i) => byte === y.config[i]);
 }
 
-/** VDAF type and configuration as carried in TaskConfiguration (DAP 19, 4.2). */
+/** VDAF type and configuration as carried in TaskConfiguration (DAP 20, 4.2). */
 export function encodeVdaf(vdaf: Vdaf): { type: number; config: Uint8Array } {
 	switch (vdaf.type) {
 		case "prio3-count":

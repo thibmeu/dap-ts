@@ -44,14 +44,14 @@ import {
 	reportErrorCode,
 	reportErrors,
 } from "./reports.js";
-import { Task, toMs, toTime } from "./task.js";
+import { DAP_VERSION, Task, toMs, toTime } from "./task.js";
 import { shareLength, type Vdaf } from "./vdaf.js";
 
 const HALF = (P + 1n) / 2n;
 const ROOT4 = 281474976710656n;
 const suite = createSuite();
 
-/** Seconds a report timestamp may lead an Aggregator's clock (DAP 19, 4.5.3.4). */
+/** Seconds a report timestamp may lead an Aggregator's clock (DAP 20, 4.5.3.4). */
 const DEFAULT_MAX_SKEW_SECONDS = 300;
 
 // Reports have independent HPKE contexts. Refill four slots as each finishes;
@@ -99,7 +99,7 @@ function encoded(values: bigint[]): Uint8Array {
 	return output;
 }
 
-/** Compute one aggregator's Prio3Count verifier share (VDAF draft 20, Section 7.3.3). */
+/** Compute one aggregator's Prio3Count verifier share (VDAF draft 22, Section 7.3.3). */
 export function countVerifierShare(
 	aggregatorId: 0 | 1,
 	verifyKey: Uint8Array,
@@ -288,7 +288,7 @@ export interface AggregatorOptions {
 	/**
 	 * Every HPKE key this Aggregator accepts, most preferred first. Keep
 	 * retired keys here for twice the configuration's cache lifetime
-	 * (DAP 19, 4.4.1).
+	 * (DAP 20, 4.4.1).
 	 */
 	readonly hpkeKeys: readonly AggregatorHpkeKey[];
 	/** Verification keys by ID. The Leader starts new jobs with the first. */
@@ -373,7 +373,7 @@ export interface AggregateShareJob {
 	finish(bucket: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
 }
 
-// A batch bucket (DAP 19, 4.5.4.3) is stored as one opaque value:
+// A batch bucket (DAP 20, 4.5.4.3) is stored as one opaque value:
 // aggregate share || report count (u64) || checksum (32) || first and last
 // report time (u64 each), so a merged bucket also yields the collected interval.
 const NO_TIME = 0xffff_ffff_ffff_ffffn;
@@ -410,7 +410,7 @@ abstract class Aggregator<V extends Vdaf> {
 		this.#taskId = decodeId(task.id, 32);
 		this.#configuration = task.encodeConfiguration();
 		this.#inputShareInfo = concat(
-			new TextEncoder().encode("dap-19 input share"),
+			new TextEncoder().encode(`dap-${DAP_VERSION} input share`),
 			Uint8Array.of(1, role === "leader" ? 2 : 3),
 		);
 		this.task = task;
@@ -430,8 +430,8 @@ abstract class Aggregator<V extends Vdaf> {
 		task: Task,
 		options: AggregatorOptions,
 	): Promise<Loaded> {
-		if (!(task instanceof Task) || task.dapVersion !== 19)
-			throw new DAPError("InvalidTask", "Expected a DAP 19 task");
+		if (!(task instanceof Task) || task.dapVersion !== DAP_VERSION)
+			throw new DAPError("InvalidTask", `Expected a DAP ${DAP_VERSION} task`);
 		const ids = (list: readonly { readonly id: number }[] | undefined) => {
 			if (!Array.isArray(list) || !list.length)
 				throw new DAPError("InvalidHpkeConfig", "Expected at least one key");
@@ -460,6 +460,10 @@ abstract class Aggregator<V extends Vdaf> {
 		if (collector) uint(collector.id, 1);
 		// Snapshot before the first await: callers may wipe or reuse their
 		// buffers, and verification keys must stay fixed for the task.
+		const hpkeKeys = options.hpkeKeys.map(({ configId, privateKey }) => ({
+			configId,
+			privateKey: copy(bytes(privateKey, 32)),
+		}));
 		const snapshot: AggregatorOptions = {
 			...options,
 			verifyKeys: options.verifyKeys.map(({ id, key }) => ({
@@ -471,10 +475,20 @@ abstract class Aggregator<V extends Vdaf> {
 		const collectorKey = collector && copy(collector.publicKey);
 		const keys = new Map<number, CryptoKeyPair>();
 		const configs: HpkeConfig[] = [];
-		for (const { configId, privateKey } of options.hpkeKeys) {
-			const { pair, publicKey } = await prepareRecipientKey(privateKey);
-			keys.set(configId, pair);
-			configs.push({ id: configId, kemId: 32, kdfId: 1, aeadId: 1, publicKey });
+		try {
+			for (const { configId, privateKey } of hpkeKeys) {
+				const { pair, publicKey } = await prepareRecipientKey(privateKey);
+				keys.set(configId, pair);
+				configs.push({
+					id: configId,
+					kemId: 32,
+					kdfId: 1,
+					aeadId: 1,
+					publicKey,
+				});
+			}
+		} finally {
+			for (const { privateKey } of hpkeKeys) privateKey.fill(0);
 		}
 		return {
 			options: snapshot,
@@ -516,7 +530,7 @@ abstract class Aggregator<V extends Vdaf> {
 		return out;
 	}
 
-	/** Combine the buckets of one batch (DAP 19, 4.6.4). */
+	/** Combine the buckets of one batch (DAP 20, 4.6.4). */
 	mergeBuckets(buckets: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
 		let result = this.#readBucket(undefined);
 		for (const encoded of buckets) {
@@ -641,7 +655,7 @@ abstract class Aggregator<V extends Vdaf> {
 			);
 	}
 
-	/** Decrypt and validate one input share (DAP 19, 4.5.3.3 and 4.5.3.4). */
+	/** Decrypt and validate one input share (DAP 20, 4.5.3.3 and 4.5.3.4). */
 	protected async open(
 		metadata: ReportMetadata,
 		publicShare: Uint8Array,
@@ -686,7 +700,7 @@ abstract class Aggregator<V extends Vdaf> {
 		}
 	}
 
-	/** Seal an aggregate share to the collector (DAP 19, 4.6.7). */
+	/** Seal an aggregate share to the collector (DAP 20, 4.6.7). */
 	protected async sealShare(
 		collectionRequest: Uint8Array,
 		share: Uint8Array,
@@ -696,7 +710,7 @@ abstract class Aggregator<V extends Vdaf> {
 			throw new DAPError("InvalidTask", "No collector HPKE configuration");
 		const sealed = await suite.Seal(collector.key, share, {
 			info: concat(
-				new TextEncoder().encode("dap-19 aggregate share"),
+				new TextEncoder().encode(`dap-${DAP_VERSION} aggregate share`),
 				Uint8Array.of(this.#role === "leader" ? 2 : 3, 0),
 			),
 			aad: concat(
@@ -739,7 +753,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	}
 
 	/**
-	 * Check an UploadReq body (DAP 19, 4.4.2.2) without decrypting it. The
+	 * Check an UploadReq body (DAP 20, 4.4.2.2) without decrypting it. The
 	 * host still checks replay and collected buckets before storing reports.
 	 */
 	upload(body: Uint8Array): Upload {
@@ -801,7 +815,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	/**
 	 * Decrypt and verify stored reports locally and build one
 	 * AggregationJobInitReq. The host must first have checked replay and
-	 * collected buckets for each report (DAP 19, 4.5.3.1).
+	 * collected buckets for each report (DAP 20, 4.5.3.1).
 	 */
 	async prepare(reports: readonly Uint8Array[]): Promise<AggregationJob> {
 		if (!reports.length)
@@ -897,7 +911,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	/**
 	 * Finish from saved state once the Helper's AggregationJobResp arrives. A
 	 * response that does not line up with the job throws, and the Leader
-	 * must abandon the job (DAP 19, 4.5.3.1).
+	 * must abandon the job (DAP 20, 4.5.3.1).
 	 */
 	finish(state: Uint8Array, response: Uint8Array): AggregatedReport[] {
 		const saved = new Reader(bytes(state));
@@ -940,7 +954,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	}
 
 	/**
-	 * Validate a CollectionJobReq (DAP 19, 4.6.1). The host checks that the
+	 * Validate a CollectionJobReq (DAP 20, 4.6.1). The host checks that the
 	 * interval's buckets are not collected yet and have no pending jobs,
 	 * then merges them.
 	 */
@@ -997,7 +1011,7 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	}
 
 	/**
-	 * Verify an AggregationJobInitReq (DAP 19, 4.5.3.2). Commit the accepted
+	 * Verify an AggregationJobInitReq (DAP 20, 4.5.3.2). Commit the accepted
 	 * output shares, then call `seal()`.
 	 */
 	async verify(request: Uint8Array): Promise<VerifiedJob> {
@@ -1118,7 +1132,7 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	}
 
 	/**
-	 * Validate an AggregateShareReq (DAP 19, 4.6.4). The host checks that the
+	 * Validate an AggregateShareReq (DAP 20, 4.6.4). The host checks that the
 	 * interval's buckets are not collected yet, then merges them.
 	 */
 	aggregateShare(body: Uint8Array): AggregateShareJob {
@@ -1150,7 +1164,10 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	}
 }
 function context(task: Task): Uint8Array {
-	return concat(new TextEncoder().encode("dap-19"), decodeId(task.id, 32));
+	return concat(
+		new TextEncoder().encode(`dap-${DAP_VERSION}`),
+		decodeId(task.id, 32),
+	);
 }
 
 /** Start the Leader's one-round Prio3 verification. Persist state until the Helper responds. */

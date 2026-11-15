@@ -22,7 +22,7 @@ const jobId = "lc7aUeGpdSNosNlh-UZhKA";
 const location = `/tasks/${task.id}/collection_jobs/${jobId}`;
 const text = new TextEncoder();
 
-it("round trips DAP 19 collection and aggregate share messages", () => {
+it("round trips DAP 20 collection and aggregate share messages", () => {
 	const request = encodeCollectionJobRequest(10, 1);
 	const checksum = new Uint8Array(32).fill(7);
 	const aggregate = encodeAggregateShareRequest(request, 42, checksum);
@@ -95,7 +95,7 @@ async function completed(
 		const share = new Uint8Array(8);
 		new DataView(share.buffer).setBigUint64(0, BigInt(value), true);
 		const info = concat(
-			text.encode("dap-19 aggregate share"),
+			text.encode("dap-20 aggregate share"),
 			Uint8Array.of(role, 0),
 		);
 		const result = await suite.Seal(publicKey, share, { info, aad });
@@ -127,7 +127,7 @@ async function completed(
 	);
 }
 
-it("encodes the DAP 19 time-interval count collection request", () => {
+it("encodes the DAP 20 time-interval count collection request", () => {
 	const encoded = encodeCollectionJobRequest(10, 2);
 	expect(encoded).toEqual(
 		Uint8Array.fromHex("010010000000000000000a0000000000000002000000000000"),
@@ -179,7 +179,7 @@ it("decrypts bounded sum shares and rejects results above the batch bound", asyn
 		new DataView(share.buffer).setBigUint64(0, value, true);
 		const ciphertext = await suite.Seal(pair.publicKey, share, {
 			info: concat(
-				text.encode("dap-19 aggregate share"),
+				text.encode("dap-20 aggregate share"),
 				Uint8Array.of(role, 0),
 			),
 			aad,
@@ -243,7 +243,7 @@ it("decrypts histogram shares and checks the bucket total", async () => {
 			view.setBigUint64(i * 16, BigInt(bucket), true);
 		const ciphertext = await suite.Seal(pair.publicKey, share, {
 			info: concat(
-				text.encode("dap-19 aggregate share"),
+				text.encode("dap-20 aggregate share"),
 				Uint8Array.of(role, 0),
 			),
 			aad,
@@ -400,7 +400,7 @@ it("rejects wrong collection locations and malformed responses", async () => {
 			prepared.process(new Response(null, { headers: { location: bad } })),
 		).rejects.toMatchObject({ code: "InvalidResponse" });
 	}
-	// DAP 19, 3.2 lets the Leader choose the job identifier and path.
+	// DAP 20, 3.2 lets the Leader choose the job identifier and path.
 	for (const good of [
 		`/tasks/${task.id}/reports/${jobId}`,
 		`${location}?token=x`,

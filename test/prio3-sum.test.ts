@@ -7,7 +7,7 @@ import sum2 from "./vectors/Prio3Sum_2.json";
 
 const bytes = (hex: string) => Uint8Array.fromHex(hex);
 
-describe("VDAF draft 20 Prio3Sum", () => {
+describe("VDAF draft 22 Prio3Sum", () => {
 	for (const [name, vector] of Object.entries({ sum0, sum2 })) {
 		it(`${name}: matches published two-aggregator shares`, () => {
 			for (const report of vector.reports) {

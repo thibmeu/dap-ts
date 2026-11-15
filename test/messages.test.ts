@@ -37,7 +37,7 @@ it("rejects oversized extension and HPKE lists with protocol errors", () => {
 });
 
 describe("task configuration", () => {
-	it("matches a hand-derived DAP 19 encoding", () => {
+	it("matches a hand-derived DAP 20 encoding", () => {
 		expect(task.encodeConfiguration()).toEqual(taskWire);
 		const decoded = decodeTaskConfiguration(taskWire);
 		expect(decoded).toEqual({

@@ -12,7 +12,7 @@ import xofVector from "./vectors/XofTurboShake128.json";
 
 const bytes = (hex: string) => Uint8Array.fromHex(hex);
 
-describe("VDAF draft 20 count vectors", () => {
+describe("VDAF draft 22 count vectors", () => {
 	for (const [name, vector] of Object.entries({ count0, count2 })) {
 		it(`${name}: sharding matches every encoded byte`, () => {
 			for (const report of vector.reports) {

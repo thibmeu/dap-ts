@@ -17,7 +17,7 @@ export const taskOptions = {
 };
 export const task = Task.create(taskOptions);
 
-// Hand-derived from DAP 19 Section 4.2. Not a published vector.
+// Hand-derived from DAP 20 Section 4.2. Not a published vector.
 export const taskWire = hex(
 	[
 		"0170", // task_info

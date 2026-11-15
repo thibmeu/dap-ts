@@ -70,12 +70,12 @@ it("prepares an encrypted count report with the exact DAP task/role binding", as
 	);
 	const expected = shardCountWithRandomness(
 		1,
-		concat(text("dap-19"), taskId),
+		concat(text("dap-20"), taskId),
 		report.metadata.id,
 		Uint8Array.from({ length: 64 }, (_, i) => i + 16),
 	);
 	for (const [i, ciphertext] of [report.leader, report.helper].entries()) {
-		const info = concat(text("dap-19 input share"), Uint8Array.of(1, i + 2));
+		const info = concat(text("dap-20 input share"), Uint8Array.of(1, i + 2));
 		const plaintext = await suite.Open(
 			privateKey,
 			ciphertext.enc,
@@ -90,7 +90,7 @@ it("prepares an encrypted count report with the exact DAP task/role binding", as
 			suite.Open(privateKey, ciphertext.enc, ciphertext.payload, {
 				aad,
 				info: concat(
-					text("dap-19 input share"),
+					text("dap-20 input share"),
 					Uint8Array.of(1, i === 0 ? 3 : 2),
 				),
 			}),
@@ -146,7 +146,7 @@ it("round-trips a bounded sum task and encrypts its published VDAF shares", asyn
 	const expected = shardSumWithRandomness(
 		1337,
 		1337,
-		concat(text("dap-19"), taskId),
+		concat(text("dap-20"), taskId),
 		report.metadata.id,
 		Uint8Array.from({ length: 64 }, (_, i) => i + 16),
 	);
@@ -162,7 +162,7 @@ it("round-trips a bounded sum task and encrypts its published VDAF shares", asyn
 			ciphertext.enc,
 			ciphertext.payload,
 			{
-				info: concat(text("dap-19 input share"), Uint8Array.of(1, i + 2)),
+				info: concat(text("dap-20 input share"), Uint8Array.of(1, i + 2)),
 				aad,
 			},
 		);
@@ -201,7 +201,7 @@ it("round-trips a histogram task and encrypts its VDAF shares", async () => {
 		2,
 		4,
 		2,
-		concat(text("dap-19"), taskId),
+		concat(text("dap-20"), taskId),
 		report.metadata.id,
 		Uint8Array.from({ length: 128 }, (_, i) => i + 16),
 	);
@@ -218,7 +218,7 @@ it("round-trips a histogram task and encrypts its VDAF shares", async () => {
 			ciphertext.enc,
 			ciphertext.payload,
 			{
-				info: concat(text("dap-19 input share"), Uint8Array.of(1, i + 2)),
+				info: concat(text("dap-20 input share"), Uint8Array.of(1, i + 2)),
 				aad,
 			},
 		);
@@ -249,7 +249,7 @@ it("snapshots extensions before encryption and detects duplicate scopes", async 
 	await expect(
 		suite.Open(privateKey, report.leader.enc, report.leader.payload, {
 			aad,
-			info: concat(text("dap-19 input share"), Uint8Array.of(1, 2)),
+			info: concat(text("dap-20 input share"), Uint8Array.of(1, 2)),
 		}),
 	).resolves.toBeInstanceOf(Uint8Array);
 	await expect(
@@ -257,7 +257,20 @@ it("snapshots extensions before encryption and detects duplicate scopes", async 
 			publicExtensions: extensions,
 			privateExtensions: { leader: extensions },
 		}),
-	).rejects.toMatchObject({ code: "InvalidReport" });
+	).rejects.toMatchObject({ code: "InvalidReport" }); // Aggregators reject unordered extensions (DAP 20, 4.5.3.4), so sort them.
+	const sorted = decodeReport(
+		encodeReport(
+			await client.prepareReport(0, {
+				publicExtensions: [
+					{ type: 9, data: hex("09") },
+					{ type: 3, data: hex("03") },
+				],
+			}),
+		),
+	);
+	expect(sorted.metadata.publicExtensions.map(({ type }) => type)).toEqual([
+		3, 9,
+	]);
 });
 
 it("rejects unsupported HPKE suites early and rotates keys explicitly", async () => {
@@ -346,7 +359,7 @@ describe("bulk uploads", () => {
 		const status = (i: number, code: number) =>
 			concat(decodeId(reports[i]!.id, 16), Uint8Array.of(code));
 		const headers = {
-			"Content-Type": 'Application/PPM-DAP; message="upload-errors";version=19',
+			"Content-Type": 'Application/PPM-DAP; message="upload-errors";version=20',
 		};
 		expect(await upload.process(new Response(null, { status: 204 }))).toEqual({
 			accepted: reports.map((r) => r.id),

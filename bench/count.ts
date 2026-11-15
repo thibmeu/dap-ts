@@ -4,7 +4,7 @@ import { performance } from "node:perf_hooks";
 const start = performance.now();
 const { shardCountWithRandomness } = await import("../dist/prio3-count.js");
 const importMs = performance.now() - start;
-const ctx = new TextEncoder().encode("dap-19 benchmark");
+const ctx = new TextEncoder().encode("dap-20 benchmark");
 const nonce = new Uint8Array(16);
 const shard = (measurement: number) =>
 	shardCountWithRandomness(

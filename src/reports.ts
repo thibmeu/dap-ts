@@ -4,7 +4,7 @@ declare const reportIdBrand: unique symbol;
 /** A report ID in URL-safe, unpadded Base 64, as DAP writes IDs in URLs. */
 export type ReportId = string & { readonly [reportIdBrand]: true };
 
-/** Report errors registered in DAP 19, Section 4.1. */
+/** Report errors registered in DAP 20, Section 4.1. */
 export type ReportError =
 	| "batch-collected"
 	| "report-replayed"

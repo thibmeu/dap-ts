@@ -9,7 +9,7 @@ import histogram2 from "./vectors/Prio3Histogram_2.json";
 
 const bytes = (hex: string) => Uint8Array.fromHex(hex);
 
-describe("VDAF draft 20 Prio3Histogram", () => {
+describe("VDAF draft 22 Prio3Histogram", () => {
 	for (const [name, vector] of Object.entries({ histogram0, histogram2 })) {
 		it(`${name}: matches published two-aggregator shares`, () => {
 			for (const report of vector.reports) {
