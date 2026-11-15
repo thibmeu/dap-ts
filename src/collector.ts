@@ -16,21 +16,32 @@ import {
 import { DAP_VERSION, Task, toMs, toTime } from "./task.js";
 import { type AggregateResult, unshard, type Vdaf } from "./vdaf.js";
 
-/** A batch interval. Both ends must fall on the task's time precision. */
-export interface CollectionQuery {
-	/** Date or Unix milliseconds, inclusive. */
-	readonly start: Date | number;
-	/** Date or Unix milliseconds, exclusive. */
-	readonly end: Date | number;
-}
+/**
+ * A time-interval task queries an interval whose ends fall on the task's time
+ * precision. A leader-selected task asks for the next batch under an
+ * idempotency key: 1 to 255 bytes in URL-safe Base 64, unique in the task.
+ * Save the key before sending so a retry cannot claim a second batch.
+ */
+export type CollectionQuery =
+	| {
+			/** Date or Unix milliseconds, inclusive. */
+			readonly start: Date | number;
+			/** Date or Unix milliseconds, exclusive. */
+			readonly end: Date | number;
+	  }
+	| { readonly idempotencyKey: string };
 
 /** Persist this JSON-safe object to resume an asynchronous collection job. */
-export interface CollectionState {
-	readonly location: string;
-	/** Unix milliseconds. */
-	readonly start: number;
-	readonly end: number;
-}
+export type CollectionState = { readonly location: string } & (
+	| {
+			/** Unix milliseconds. */
+			readonly start: number;
+			readonly end: number;
+	  }
+	| { readonly idempotencyKey: string }
+);
+
+type Query = { start: number; end: number } | { idempotencyKey: string };
 
 export type CollectionProgress<V extends Vdaf = Vdaf> =
 	| {
@@ -60,6 +71,14 @@ export interface CollectorOptions {
 	readonly privateKey: Uint8Array;
 	/** Unix milliseconds, as returned by Date.now(). Used for Retry-After dates. */
 	readonly clock?: () => number;
+}
+
+/** Decode an idempotency key of 1 to 255 bytes (DAP 20, 5.2.1). */
+function idempotencyKey(key: string): Uint8Array {
+	const length = Math.floor(((key?.length ?? 0) * 3) / 4);
+	if (length < 1 || length > 255)
+		throw new DAPError("InvalidMessage", "Invalid idempotency key");
+	return decodeId(key, length);
 }
 
 // A collection response holds two ciphertexts of at most one Field128 share
@@ -119,8 +138,8 @@ export class Collector<V extends Vdaf = Vdaf> {
 	}
 
 	prepare(query: CollectionQuery): PreparedCollection<V> {
-		const interval = this.#interval(query.start, query.end);
-		const body = this.#request(interval);
+		const checked = this.#query(query);
+		const body = this.#request(checked);
 		const url = this.#creationUrl;
 		return {
 			get request() {
@@ -131,15 +150,15 @@ export class Collector<V extends Vdaf = Vdaf> {
 					body,
 				);
 			},
-			process: (response) => this.#process(response, body, interval),
+			process: (response) => this.#process(response, body, checked),
 		};
 	}
 
 	resume(state: CollectionState): PreparedCollection<V> {
 		if (!state || typeof state !== "object")
 			throw new DAPError("InvalidMessage", "Invalid saved collection state");
-		const interval = this.#interval(state.start, state.end);
-		const body = this.#request(interval);
+		const checked = this.#query(state);
+		const body = this.#request(checked);
 		const location = this.#location(state.location);
 		return {
 			get request() {
@@ -147,17 +166,26 @@ export class Collector<V extends Vdaf = Vdaf> {
 					accept: "application/ppm-dap;message=collection-job-resp",
 				});
 			},
-			process: (response) => this.#process(response, body, interval, location),
+			process: (response) => this.#process(response, body, checked, location),
 		};
 	}
 
-	#interval(
-		start: Date | number,
-		end: Date | number,
-	): { start: number; end: number } {
+	#query(query: CollectionQuery): Query {
+		const leaderSelected = this.task.batchMode === "leader-selected";
+		if (leaderSelected !== ("idempotencyKey" in query))
+			throw new DAPError(
+				"InvalidMessage",
+				leaderSelected
+					? "Leader-selected collections need an idempotency key"
+					: "Time-interval collections need start and end",
+			);
+		if ("idempotencyKey" in query) {
+			idempotencyKey(query.idempotencyKey);
+			return { idempotencyKey: query.idempotencyKey };
+		}
 		const ms = (value: Date | number) =>
 			value instanceof Date ? value.getTime() : value;
-		const interval = { start: ms(start), end: ms(end) };
+		const interval = { start: ms(query.start), end: ms(query.end) };
 		const unit = this.task.timePrecision * 1000;
 		for (const value of [interval.start, interval.end])
 			if (!Number.isSafeInteger(value) || value < 0 || value % unit)
@@ -170,11 +198,13 @@ export class Collector<V extends Vdaf = Vdaf> {
 		return interval;
 	}
 
-	#request(interval: { start: number; end: number }): Uint8Array<ArrayBuffer> {
-		const start = toTime(this.task, interval.start);
+	#request(query: Query): Uint8Array<ArrayBuffer> {
+		if ("idempotencyKey" in query)
+			return encodeCollectionJobRequest(idempotencyKey(query.idempotencyKey));
+		const start = toTime(this.task, query.start);
 		return encodeCollectionJobRequest(
 			start,
-			toTime(this.task, interval.end) - start,
+			toTime(this.task, query.end) - start,
 		);
 	}
 
@@ -206,7 +236,7 @@ export class Collector<V extends Vdaf = Vdaf> {
 	async #process(
 		response: Response,
 		requestBody: Uint8Array,
-		interval: { start: number; end: number },
+		query: Query,
 		previousLocation?: string,
 	): Promise<CollectionProgress<V>> {
 		await checkStatus(response);
@@ -228,7 +258,7 @@ export class Collector<V extends Vdaf = Vdaf> {
 			}
 			return {
 				status: "pending",
-				state: { location, ...interval },
+				state: { location, ...query },
 				retryAfter,
 			};
 		}
@@ -241,11 +271,10 @@ export class Collector<V extends Vdaf = Vdaf> {
 				cause,
 			});
 		}
-		const queryStart = toTime(this.task, interval.start);
-		const queryEnd = toTime(this.task, interval.end);
 		if (
-			result.start < queryStart ||
-			result.start + result.duration > queryEnd ||
+			("start" in query &&
+				(result.start < toTime(this.task, query.start) ||
+					result.start + result.duration > toTime(this.task, query.end))) ||
 			result.reportCount < BigInt(this.task.minBatchSize) ||
 			result.reportCount > BigInt(Number.MAX_SAFE_INTEGER)
 		)

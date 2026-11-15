@@ -309,7 +309,10 @@ export interface Interval {
 
 export interface ReportRef {
 	readonly id: ReportId;
-	/** Unix milliseconds, truncated to the task's time precision. It names the report's batch bucket. */
+	/**
+	 * Unix milliseconds, truncated to the task's time precision. In
+	 * time-interval tasks it names the report's batch bucket.
+	 */
 	readonly time: number;
 }
 export interface ReportRejectionEntry {
@@ -349,6 +352,8 @@ export interface AggregationJob {
 	readonly rejected: readonly (ReportRef & { readonly error: ReportError })[];
 }
 export interface VerifiedJob {
+	/** The leader-selected batch, and so the bucket, of every report in the job. */
+	readonly batchId: string | undefined;
 	readonly reports: readonly AggregatedReport[];
 	/**
 	 * Build the AggregationJobResp body once the host has committed the
@@ -357,21 +362,32 @@ export interface VerifiedJob {
 	 */
 	seal(rejected?: readonly ReportRejectionEntry[]): Uint8Array<ArrayBuffer>;
 }
-export interface CollectionJob {
-	readonly interval: Interval;
-	/** The AggregateShareReq body for the merged bucket of `interval`. */
-	aggregateShareRequest(bucket: Uint8Array): Uint8Array<ArrayBuffer>;
+/**
+ * A time-interval query names its interval. A leader-selected query carries
+ * the Collector's idempotency key; the host maps it to one batch ID it picks.
+ */
+export type CollectionJob = (
+	| { readonly interval: Interval; readonly idempotencyKey?: never }
+	| { readonly idempotencyKey: string; readonly interval?: never }
+) & {
+	/** The AggregateShareReq body for the merged bucket. Leader-selected jobs need the batch ID. */
+	aggregateShareRequest(
+		bucket: Uint8Array,
+		batchId?: string,
+	): Uint8Array<ArrayBuffer>;
 	/** The CollectionJobResp body, given the Helper's AggregateShare body. */
 	finish(
 		bucket: Uint8Array,
 		helperResponse: Uint8Array,
 	): Promise<Uint8Array<ArrayBuffer>>;
-}
-export interface AggregateShareJob {
-	readonly interval: Interval;
+};
+export type AggregateShareJob = (
+	| { readonly interval: Interval; readonly batchId?: never }
+	| { readonly batchId: string; readonly interval?: never }
+) & {
 	/** Check the merged bucket against the Leader's and seal the AggregateShare body. */
 	finish(bucket: Uint8Array): Promise<Uint8Array<ArrayBuffer>>;
-}
+};
 
 // A batch bucket (DAP 20, 4.5.4.3) is stored as one opaque value:
 // aggregate share || report count (u64) || checksum (32) || first and last
@@ -644,6 +660,24 @@ abstract class Aggregator<V extends Vdaf> {
 		}
 	}
 
+	/** A leader-selected batch ID, required by those tasks and refused by others. */
+	protected batchId(id: string | undefined): Uint8Array | undefined {
+		if ((id !== undefined) !== (this.task.batchMode === "leader-selected"))
+			throw new DAPError(
+				"InvalidMessage",
+				"Leader-selected tasks, and only they, take a batch ID",
+			);
+		return id === undefined ? undefined : decodeId(id, 32);
+	}
+
+	protected checkBatchMode(leaderSelected: boolean): void {
+		if (leaderSelected !== (this.task.batchMode === "leader-selected"))
+			throw new DAPError(
+				"InvalidMessage",
+				"Query does not match the batch mode",
+			);
+	}
+
 	protected minimumBatch(count: bigint): void {
 		if (count < BigInt(this.task.minBatchSize))
 			throw new DAPError(
@@ -727,11 +761,18 @@ abstract class Aggregator<V extends Vdaf> {
 	}
 }
 
-function jobHeader(verificationKeyId: number): Uint8Array {
+function jobHeader(
+	verificationKeyId: number,
+	batchId?: Uint8Array,
+): Uint8Array {
+	// DAP 20, 5.2.2: leader_selected_batch_id(1) carries the batch ID.
+	const extensions = batchId
+		? concat(uint(1, 2), vector(batchId, 2))
+		: new Uint8Array();
 	return concat(
 		uint(verificationKeyId, 1),
 		vector(new Uint8Array(), 4),
-		vector(new Uint8Array(), 2),
+		vector(extensions, 2),
 	);
 }
 
@@ -815,11 +856,16 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 	/**
 	 * Decrypt and verify stored reports locally and build one
 	 * AggregationJobInitReq. The host must first have checked replay and
-	 * collected buckets for each report (DAP 20, 4.5.3.1).
+	 * collected buckets for each report (DAP 20, 4.5.3.1). Leader-selected
+	 * tasks assign the whole job to `batchId`, 32 bytes in URL-safe Base 64.
 	 */
-	async prepare(reports: readonly Uint8Array[]): Promise<AggregationJob> {
+	async prepare(
+		reports: readonly Uint8Array[],
+		options: { readonly batchId?: string } = {},
+	): Promise<AggregationJob> {
 		if (!reports.length)
 			throw new DAPError("InvalidMessage", "Expected at least one report");
+		const batchId = this.batchId(options.batchId);
 		const { id: keyId, key } = this.firstVerifyKey;
 		const seen = new Set<string>();
 		const ready: ReportRef[] = [];
@@ -900,7 +946,7 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 		}
 		return Object.freeze({
 			request: ready.length
-				? concatParts([jobHeader(keyId), ...requestParts])
+				? concatParts([jobHeader(keyId, batchId), ...requestParts])
 				: undefined,
 			state: concatParts(stateParts),
 			reports: Object.freeze(ready),
@@ -955,22 +1001,25 @@ export class Leader<V extends Vdaf = Vdaf> extends Aggregator<V> {
 
 	/**
 	 * Validate a CollectionJobReq (DAP 20, 4.6.1). The host checks that the
-	 * interval's buckets are not collected yet and have no pending jobs,
-	 * then merges them.
+	 * batch's buckets are not collected yet and have no pending jobs, then
+	 * merges them.
 	 */
 	collection(body: Uint8Array): CollectionJob {
 		const request = copy(body);
 		const query = decodeCollectionJobRequest(request);
-		const interval = this.interval(query.start, query.duration);
+		this.checkBatchMode("idempotencyKey" in query);
 		return Object.freeze({
-			interval,
-			aggregateShareRequest: (bucket: Uint8Array) => {
+			...("idempotencyKey" in query
+				? { idempotencyKey: base64url(query.idempotencyKey) }
+				: { interval: this.interval(query.start, query.duration) }),
+			aggregateShareRequest: (bucket: Uint8Array, batchId?: string) => {
 				const count = BigInt(this.bucketReportCount(bucket));
 				this.minimumBatch(count);
 				return encodeAggregateShareRequest(
 					request,
 					count,
 					this.bucketChecksum(bucket),
+					this.batchId(batchId),
 				);
 			},
 			finish: async (bucket: Uint8Array, helperResponse: Uint8Array) => {
@@ -1025,14 +1074,24 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 					type: "invalidAggregationParameter",
 				},
 			);
-		if (reader.vector(2).length)
-			throw new DAPError(
-				"InvalidMessage",
-				"Unsupported aggregation job extension",
-				{
-					type: "unsupportedExtension",
-				},
-			);
+		const extensions = new Reader(reader.vector(2));
+		let batchId: string | undefined;
+		while (extensions.remaining) {
+			const type = extensions.uint(2);
+			const data = extensions.vector(2);
+			if (type !== 1 || this.task.batchMode !== "leader-selected")
+				throw new DAPError(
+					"InvalidMessage",
+					"Unsupported aggregation job extension",
+					{ type: "unsupportedExtension" },
+				);
+			if (batchId !== undefined || data.length !== 32)
+				throw new DAPError("InvalidMessage", "Invalid batch ID extension");
+			batchId = base64url(data);
+		}
+		// DAP 20, 5.2.2: leader-selected jobs must name their batch.
+		if (this.task.batchMode === "leader-selected" && batchId === undefined)
+			throw new DAPError("InvalidMessage", "Missing batch ID extension");
 		const entries = [];
 		const seen = new Set<string>();
 		while (reader.remaining) {
@@ -1106,6 +1165,7 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 			},
 		);
 		return Object.freeze({
+			batchId,
 			reports: Object.freeze(
 				results.map(({ response: _, ...report }) => Object.freeze(report)),
 			) as readonly AggregatedReport[],
@@ -1133,13 +1193,15 @@ export class Helper<V extends Vdaf = Vdaf> extends Aggregator<V> {
 
 	/**
 	 * Validate an AggregateShareReq (DAP 20, 4.6.4). The host checks that the
-	 * interval's buckets are not collected yet, then merges them.
+	 * batch's buckets are not collected yet, then merges them.
 	 */
 	aggregateShare(body: Uint8Array): AggregateShareJob {
 		const request = decodeAggregateShareRequest(bytes(body));
-		const interval = this.interval(request.start, request.duration);
+		this.checkBatchMode("batchId" in request);
 		return Object.freeze({
-			interval,
+			...("batchId" in request
+				? { batchId: base64url(request.batchId) }
+				: { interval: this.interval(request.start, request.duration) }),
 			finish: async (bucket: Uint8Array) => {
 				const count = BigInt(this.bucketReportCount(bucket));
 				this.minimumBatch(count);

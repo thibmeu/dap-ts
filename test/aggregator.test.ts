@@ -531,6 +531,94 @@ it("collects merged buckets end to end", async () => {
 	).rejects.toThrow("No collector HPKE configuration");
 });
 
+it("collects a leader-selected batch end to end", async () => {
+	const lsTask = Task.create({ ...taskOptions, batchMode: "leader-selected" });
+	const keys = await collectorKeys();
+	const options = {
+		clock: () => 10_000_000,
+		verifyKeys,
+		collector: keys.config,
+	};
+	const leader = await Leader.create(lsTask, {
+		...options,
+		hpkeKeys: [{ configId: 7, privateKey }],
+	});
+	const helper = await Helper.create(lsTask, {
+		...options,
+		hpkeKeys: [{ configId: 8, privateKey }],
+	});
+	const c = await Client.create(lsTask, { hpke });
+	const reports = (
+		await c.prepareReports([...Array(100).fill(1), 0], { time: 120_000 })
+	).map(encodeReport);
+	await expect(leader.prepare(reports)).rejects.toThrow("batch ID");
+	const batchId = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+	const job = await leader.prepare(reports, { batchId });
+
+	// DAP 20, 5.2.2: the Helper requires the batch ID extension, and a
+	// time-interval Helper does not recognize it.
+	const bare = concat(job.request!.subarray(0, 1), uint(0, 4), uint(0, 2));
+	const tail = job.request!.subarray(1 + 4 + 2 + 2 + 2 + 32);
+	await expect(helper.verify(concat(bare, tail))).rejects.toThrow(
+		"Missing batch ID extension",
+	);
+	const timeHelper = await Helper.create(task, {
+		...options,
+		hpkeKeys: [{ configId: 8, privateKey }],
+	});
+	await expect(timeHelper.verify(job.request!)).rejects.toMatchObject({
+		type: "unsupportedExtension",
+	});
+
+	const verified = await helper.verify(job.request!);
+	expect(verified.batchId).toBe(batchId);
+	let helperBucket: Uint8Array | undefined;
+	for (const r of verified.reports)
+		helperBucket = helper.addToBucket(helperBucket, r as never);
+	let leaderBucket: Uint8Array | undefined;
+	for (const r of leader.finish(job.state, verified.seal()))
+		leaderBucket = leader.addToBucket(leaderBucket, r as never);
+
+	const collector = await Collector.create(lsTask, {
+		configId: keys.config.id,
+		privateKey: keys.privateKey,
+	});
+	const prepared = collector.prepare({ idempotencyKey: "a2V5" });
+	const collection = leader.collection(
+		new Uint8Array(await prepared.request.arrayBuffer()),
+	);
+	expect(collection.idempotencyKey).toBe("a2V5");
+	const share = helper.aggregateShare(
+		collection.aggregateShareRequest(leaderBucket!, batchId),
+	);
+	expect(share.batchId).toBe(batchId);
+	const response = await collection.finish(
+		leaderBucket!,
+		await share.finish(helperBucket!),
+	);
+	const location = "/tasks/x/collection_jobs/y";
+	const pending = await prepared.process(
+		new Response(null, { headers: { location } }),
+	);
+	expect(pending).toMatchObject({
+		state: { location: `https://l${location}`, idempotencyKey: "a2V5" },
+	});
+	if (pending.status !== "pending") throw new Error("Expected pending");
+	const result = await collector.resume(pending.state).process(
+		new Response(response, {
+			headers: {
+				"content-type": "application/ppm-dap;message=collection-job-resp",
+			},
+		}),
+	);
+	expect(result).toEqual({
+		status: "complete",
+		value: 100n,
+		reportCount: 101,
+		interval: { start: 120_000, end: 180_000 },
+	});
+});
+
 it("refills four report slots and preserves order when opens finish out of order", async () => {
 	const { leader, helper } = await roles();
 	const c = await client();

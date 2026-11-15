@@ -35,7 +35,7 @@ export type { AggregatorHpkeConfigs, RandomSource } from "./hpke.js";
 export { HpkeConfigList } from "./hpke.js";
 export type { HpkeCiphertext, HpkeConfig, Report } from "./messages.js";
 export type { PreparedReport, ReportError, ReportId } from "./reports.js";
-export type { EncodedTask, TaskOptions } from "./task.js";
+export type { BatchMode, EncodedTask, TaskOptions } from "./task.js";
 export { Task } from "./task.js";
 export type {
 	AggregateResult,

@@ -111,7 +111,7 @@ describe("task configuration", () => {
 		for (const patch of [
 			{ vdafType: 2 },
 			{ vdafConfig: hex("00") },
-			{ batchMode: 2 },
+			{ batchMode: 3 },
 			{ batchConfig: hex("00") },
 			{ extensions: [{ type: 2, data: hex("") }] },
 		]) {

@@ -9,7 +9,7 @@ seeing any single value, and a collector gets only the aggregate.
 
 ## Features
 
-- **[DAP draft 20](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-20.html)**: all four roles: Client, Leader, Helper, and Collector
+- **[DAP draft 20](https://www.ietf.org/archive/id/draft-ietf-ppm-dap-20.html)**: all four roles: Client, Leader, Helper, and Collector, with time-interval and leader-selected batches
 - **[VDAF draft 22](https://www.ietf.org/archive/id/draft-irtf-cfrg-vdaf-22.html)**: Prio3Count, Prio3Sum, and Prio3Histogram, checked against the published vectors
 - **Web APIs**: runs in browsers, Web Workers, Cloudflare Workers, and Node.js
 - **Bring your own I/O**: Client and Collector build Web `Request` objects and read `Response` objects; aggregators take and return bytes. HTTP, authentication, and storage stay with you
@@ -137,6 +137,16 @@ A batch bucket is one opaque `Uint8Array` per report time; pass `undefined`
 to start one. For collection, `leader.collection(body)` and
 `helper.aggregateShare(body)` return the requested interval. Merge its buckets
 with `mergeBuckets()`, then call the returned job's `finish()`.
+
+With `batchMode: "leader-selected"`, the Leader groups reports into batches
+it names with 32-byte IDs in URL-safe Base 64. Pass the ID to
+`leader.prepare(reports, { batchId })`; `verified.batchId` tells the Helper
+which bucket to use. The Collector asks for the next batch with
+`collector.prepare({ idempotencyKey })`, a key it saves before sending.
+`leader.collection(body).idempotencyKey` identifies the request: map it to one
+uncollected batch of at least `minBatchSize` reports, and pass that batch ID
+to `aggregateShareRequest(bucket, batchId)`. The Helper's
+`aggregateShare(body).batchId` names the bucket to merge.
 
 Your storage must enforce what the library cannot see: reject replayed reports
 and reports for collected batches, commit output shares together with the

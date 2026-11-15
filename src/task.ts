@@ -26,7 +26,7 @@ export interface TaskOptions<V extends Vdaf> {
 	/** Seconds per DAP time unit. Report times and batch buckets use it. */
 	readonly timePrecision: number;
 	readonly minBatchSize: number;
-	readonly batchMode: "time-interval";
+	readonly batchMode: BatchMode;
 	readonly vdaf: V;
 	readonly extensions?: readonly Extension[];
 	/** Test-only compatibility with Janus's unreleased DAP 18 profile. */
@@ -35,6 +35,9 @@ export interface TaskOptions<V extends Vdaf> {
 		readonly allowInsecureHttp: true;
 	};
 }
+/** How reports are grouped into batches (DAP 20, 5). */
+export type BatchMode = "time-interval" | "leader-selected";
+
 export interface EncodedTask {
 	readonly id: string;
 	readonly configuration: Uint8Array;
@@ -85,7 +88,7 @@ export class Task<V extends Vdaf = Vdaf> {
 	readonly helper: string;
 	readonly timePrecision: number;
 	readonly minBatchSize: number;
-	readonly batchMode = "time-interval" as const;
+	readonly batchMode: BatchMode;
 	readonly vdaf: V;
 	/** @internal Test compatibility; production tasks always use DAP_VERSION. */
 	readonly dapVersion: 18 | typeof DAP_VERSION;
@@ -105,12 +108,13 @@ export class Task<V extends Vdaf = Vdaf> {
 		this.dapVersion = testOnly?.dapVersion ?? DAP_VERSION;
 		this.timePrecision = positiveSafe(configuration.timePrecision);
 		this.minBatchSize = positiveSafe(configuration.minBatchSize);
-		if (configuration.batchMode !== 1 || configuration.batchConfig.length) {
-			throw new DAPError(
-				"InvalidTask",
-				"Only time-interval batches are supported",
-			);
-		}
+		if (
+			(configuration.batchMode !== 1 && configuration.batchMode !== 2) ||
+			configuration.batchConfig.length
+		)
+			throw new DAPError("InvalidTask", "Unsupported batch mode");
+		this.batchMode =
+			configuration.batchMode === 1 ? "time-interval" : "leader-selected";
 		let vdaf: Vdaf | undefined;
 		try {
 			vdaf = decodeVdaf(configuration.vdafType, configuration.vdafConfig);
@@ -147,7 +151,10 @@ export class Task<V extends Vdaf = Vdaf> {
 				cause,
 			});
 		}
-		if (options.batchMode !== "time-interval")
+		if (
+			options.batchMode !== "time-interval" &&
+			options.batchMode !== "leader-selected"
+		)
 			throw new DAPError("InvalidTask", "Unsupported batch mode");
 		if (
 			!Number.isSafeInteger(options.timePrecision) ||
@@ -175,7 +182,7 @@ export class Task<V extends Vdaf = Vdaf> {
 			helper: text.encode(options.helper),
 			timePrecision: BigInt(options.timePrecision),
 			minBatchSize: BigInt(options.minBatchSize),
-			batchMode: 1,
+			batchMode: options.batchMode === "time-interval" ? 1 : 2,
 			batchConfig: new Uint8Array(),
 			vdafType: type,
 			vdafConfig: config,

@@ -4,9 +4,14 @@ Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachang
 
 ## Unreleased
 
+### Added
+
+- Leader-selected batches (DAP 20, 5.2): `batchId` on `leader.prepare()` and Helper results, idempotency keys for Collector queries, and batch IDs in collection and aggregate share jobs.
+
 ### Changed
 
 - Target DAP draft 20 and VDAF draft 22. HPKE and VDAF contexts now use `dap-20`, so DAP 19 peers cannot decrypt or verify what this version produces. The published VDAF vectors are unchanged.
+- `CollectionQuery`, `CollectionState`, `CollectionJob`, and `AggregateShareJob` are unions on the batch mode; narrow on `interval` before reading it.
 - Sort report extensions by type before encoding; aggregators reject extensions that are not in strictly increasing order.
 
 - Process up to four reports concurrently per Leader/Helper job, preserving report order and reusing fixed task and HPKE context bytes.

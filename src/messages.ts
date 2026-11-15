@@ -3,6 +3,7 @@ import {
 	bytes,
 	concat,
 	concatParts,
+	copy,
 	decodeId,
 	Reader,
 	uint,
@@ -69,46 +70,70 @@ export interface CollectionJobResponse {
 	readonly helper: HpkeCiphertext;
 }
 
+/** A time-interval query, or a leader-selected query's idempotency key (DAP 20, 5). */
+export type CollectionQueryConfig =
+	| { readonly start: bigint; readonly duration: bigint }
+	| { readonly idempotencyKey: Uint8Array };
+
 /** The supported Prio3 VDAFs have empty aggregation parameters and collection extensions. */
+export function encodeCollectionJobRequest(
+	idempotencyKey: Uint8Array,
+): Uint8Array<ArrayBuffer>;
 export function encodeCollectionJobRequest(
 	start: number | bigint,
 	duration: number | bigint,
+): Uint8Array<ArrayBuffer>;
+export function encodeCollectionJobRequest(
+	start: number | bigint | Uint8Array,
+	duration?: number | bigint,
 ): Uint8Array<ArrayBuffer> {
-	const encodedStart = uint(start, 8);
-	const encodedDuration = uint(duration, 8);
-	if (
-		BigInt(duration) === 0n ||
-		BigInt(start) + BigInt(duration) > 0xffffffffffffffffn
-	)
-		throw new DAPError("InvalidMessage", "Invalid collection interval");
+	let query: Uint8Array;
+	if (start instanceof Uint8Array)
+		query = concat(uint(2, 1), vector(vector(start, 1, 1), 2));
+	else {
+		const interval = concat(uint(start, 8), uint(duration ?? 0, 8));
+		if (
+			BigInt(duration ?? 0) === 0n ||
+			BigInt(start) + BigInt(duration ?? 0) > 0xffffffffffffffffn
+		)
+			throw new DAPError("InvalidMessage", "Invalid collection interval");
+		query = concat(uint(1, 1), vector(interval, 2));
+	}
 	return concat(
-		uint(1, 1),
-		vector(concat(encodedStart, encodedDuration), 2),
+		query,
 		vector(new Uint8Array(), 4),
 		vector(new Uint8Array(), 2),
 	);
 }
 
-export function decodeCollectionJobRequest(input: Uint8Array): {
-	start: bigint;
-	duration: bigint;
-} {
-	const reader = new Reader(input);
-	if (reader.uint(1) !== 1)
-		throw new DAPError("InvalidMessage", "Expected time-interval query");
+function readCollectionJobRequest(reader: Reader): CollectionQueryConfig {
+	const mode = reader.uint(1);
 	const query = new Reader(reader.vector(2));
-	const start = query.u64();
-	const duration = query.u64();
+	let result: CollectionQueryConfig;
+	if (mode === 1) {
+		const start = query.u64();
+		const duration = query.u64();
+		if (duration === 0n || start + duration > 0xffffffffffffffffn)
+			throw new DAPError("InvalidMessage", "Invalid collection interval");
+		result = { start, duration };
+	} else if (mode === 2) result = { idempotencyKey: query.vector(1, 1) };
+	else throw new DAPError("InvalidMessage", "Unknown batch mode");
 	query.end();
 	if (reader.vector(4).length || reader.vector(2).length)
 		throw new DAPError(
 			"InvalidMessage",
-			"Expected empty count parameter and extensions",
+			"Expected empty aggregation parameter and extensions",
 		);
+	return result;
+}
+
+export function decodeCollectionJobRequest(
+	input: Uint8Array,
+): CollectionQueryConfig {
+	const reader = new Reader(input);
+	const result = readCollectionJobRequest(reader);
 	reader.end();
-	if (duration === 0n || start + duration > 0xffffffffffffffffn)
-		throw new DAPError("InvalidMessage", "Invalid collection interval");
-	return { start, duration };
+	return result;
 }
 
 export function decodeCollectionJobResponse(
@@ -148,16 +173,24 @@ export function encodeCollectionJobResponse(
 	);
 }
 
+/** Leader-selected requests also need the 32-byte batch ID the Leader chose. */
 export function encodeAggregateShareRequest(
 	collectionRequest: Uint8Array,
 	reportCount: number | bigint,
 	checksum: Uint8Array,
+	batchId?: Uint8Array,
 ): Uint8Array<ArrayBuffer> {
-	const { start, duration } = decodeCollectionJobRequest(collectionRequest);
+	const query = decodeCollectionJobRequest(collectionRequest);
+	const selector =
+		"idempotencyKey" in query
+			? concat(uint(2, 1), vector(bytes(batchId as Uint8Array, 32), 2))
+			: concat(
+					uint(1, 1),
+					vector(concat(uint(query.start, 8), uint(query.duration, 8)), 2),
+				);
 	return concat(
 		collectionRequest,
-		uint(1, 1),
-		vector(concat(uint(start, 8), uint(duration, 8)), 2),
+		selector,
 		uint(reportCount, 8),
 		bytes(checksum, 32),
 	);
@@ -165,40 +198,36 @@ export function encodeAggregateShareRequest(
 
 export function decodeAggregateShareRequest(input: Uint8Array): {
 	collectionRequest: Uint8Array;
-	start: bigint;
-	duration: bigint;
 	reportCount: bigint;
 	checksum: Uint8Array;
-} {
+} & ({ start: bigint; duration: bigint } | { batchId: Uint8Array }) {
 	const reader = new Reader(input);
-	const collectionRequest = reader.take(25);
-	const { start, duration } = decodeCollectionJobRequest(collectionRequest);
-	if (reader.uint(1) !== 1)
-		throw new DAPError(
-			"InvalidMessage",
-			"Expected time-interval batch selector",
-		);
+	const query = readCollectionJobRequest(reader);
+	const collectionRequest = copy(
+		input.subarray(0, input.length - reader.remaining),
+	);
+	const mode = reader.uint(1);
 	const selector = new Reader(reader.vector(2));
-	const selectedStart = selector.u64();
-	const selectedDuration = selector.u64();
+	if (mode !== ("idempotencyKey" in query ? 2 : 1))
+		throw new DAPError("InvalidMessage", "Batch selector does not match query");
+	const batch: { start: bigint; duration: bigint } | { batchId: Uint8Array } =
+		mode === 2
+			? { batchId: selector.take(32) }
+			: { start: selector.u64(), duration: selector.u64() };
 	selector.end();
 	const reportCount = reader.u64();
 	const checksum = reader.take(32);
 	reader.end();
 	// DAP 20, 5.1.2: the selected interval must lie within the query.
 	if (
-		selectedDuration === 0n ||
-		selectedStart < start ||
-		selectedStart + selectedDuration > start + duration
+		"start" in batch &&
+		"start" in query &&
+		(batch.duration === 0n ||
+			batch.start < query.start ||
+			batch.start + batch.duration > query.start + query.duration)
 	)
 		throw new DAPError("InvalidMessage", "Batch selector does not match query");
-	return {
-		collectionRequest,
-		start: selectedStart,
-		duration: selectedDuration,
-		reportCount,
-		checksum,
-	};
+	return { collectionRequest, ...batch, reportCount, checksum };
 }
 
 export function encodeAggregateShare(
