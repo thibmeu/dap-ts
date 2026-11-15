@@ -172,7 +172,7 @@ export class Collector<V extends Vdaf = Vdaf> {
 
 	#query(query: CollectionQuery): Query {
 		const leaderSelected = this.task.batchMode === "leader-selected";
-		if (leaderSelected !== ("idempotencyKey" in query))
+		if (leaderSelected !== "idempotencyKey" in query)
 			throw new DAPError(
 				"InvalidMessage",
 				leaderSelected
