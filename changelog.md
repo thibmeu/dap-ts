@@ -2,7 +2,7 @@
 
 Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## Unreleased
+## [0.2.0] - 2026-11-15
 
 ### Added
 
@@ -13,7 +13,6 @@ Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachang
 - Target DAP draft 20 and VDAF draft 22. HPKE and VDAF contexts now use `dap-20`, so DAP 19 peers cannot decrypt or verify what this version produces. The published VDAF vectors are unchanged.
 - `CollectionQuery`, `CollectionState`, `CollectionJob`, and `AggregateShareJob` are unions on the batch mode; narrow on `interval` before reading it.
 - Sort report extensions by type before encoding; aggregators reject extensions that are not in strictly increasing order.
-
 - Process up to four reports concurrently per Leader/Helper job, preserving report order and reusing fixed task and HPKE context bytes.
 - Import the collector HPKE public key once per Leader/Helper instead of per aggregate share.
 - Speed up Prio3Histogram verification: decode Field128 with two 64-bit reads, cache inverse NTT roots, and evaluate wire polynomials without building the wire matrix.
@@ -22,7 +21,6 @@ Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachang
 ### Fixed
 
 - `Leader.create()` and `Helper.create()` copy key bytes before their first await. Wiping a key buffer right after calling `create()`, before it resolved, changed the keys the role used.
-
 - Reject Sum collections whose measurement bound times the report count can wrap modulo Field64.
 - Take owned copies of caller bytes. With Node.js Buffers, `slice()` returned views, so wiping or reusing a buffer after the call changed verification keys, the collector key, HPKE config lists, decoded tasks and messages, and joint randomness inputs. `addToBucket()` also ignored a Buffer's byte offset and corrupted the bucket.
 
@@ -41,4 +39,5 @@ and time-interval batches.
 - `DAPError` and `problemResponse()` for RFC 9457 problem details.
 - Binary message codecs in `@thibmeu/dap/messages`.
 
+[0.2.0]: https://github.com/thibmeu/dap-ts/releases/tag/v0.2.0
 [0.1.0]: https://github.com/thibmeu/dap-ts/releases/tag/v0.1.0
