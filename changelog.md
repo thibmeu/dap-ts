@@ -2,12 +2,6 @@
 
 Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## Unreleased
-
-### Changed
-
-- Update hpke to 1.1.8.
-
 ## [0.2.0] - 2026-11-15
 
 ### Added
@@ -19,6 +13,7 @@ Notable changes to @thibmeu/dap, following [Keep a Changelog](https://keepachang
 - Target DAP draft 20 and VDAF draft 22. HPKE and VDAF contexts now use `dap-20`, so DAP 19 peers cannot decrypt or verify what this version produces. The published VDAF vectors are unchanged.
 - `CollectionQuery`, `CollectionState`, `CollectionJob`, and `AggregateShareJob` are unions on the batch mode; narrow on `interval` before reading it.
 - Sort report extensions by type before encoding; aggregators reject extensions that are not in strictly increasing order.
+- Update hpke to 1.1.8.
 - Process up to four reports concurrently per Leader/Helper job, preserving report order and reusing fixed task and HPKE context bytes.
 - Import the collector HPKE public key once per Leader/Helper instead of per aggregate share.
 - Speed up Prio3Histogram verification: decode Field128 with two 64-bit reads, cache inverse NTT roots, and evaluate wire polynomials without building the wire matrix.
