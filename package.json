@@ -52,7 +52,7 @@
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
-    "hpke": "1.1.8"
+    "hpke": "1.1.10"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
